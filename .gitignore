@@ -19,3 +19,6 @@ Package.resolved
 
 # Logs
 *.log
+
+# Xcode user data (do not commit)
+**/*.xcodeproj/xcuserdata/
