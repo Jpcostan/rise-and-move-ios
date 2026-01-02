@@ -1,23 +1,29 @@
 import SwiftUI
 import UserNotifications
 import StoreKit
+import OSLog
 
 @main
 struct Rise_MoveApp: App {
-    private let router: AppRouter
+    @StateObject private var router: AppRouter
+    @StateObject private var store: AlarmStore
+    @StateObject private var entitlements: EntitlementManager
+
     private let notificationDelegate: NotificationDelegate
-    private let entitlements: EntitlementManager
 
     init() {
         let router = AppRouter()
+        let store = AlarmStore()
         let delegate = NotificationDelegate()
         let entitlements = EntitlementManager()
+        let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "RiseAndMove", category: "StoreKit")
 
-        self.router = router
+        _router = StateObject(wrappedValue: router)
+        _store = StateObject(wrappedValue: store)
+        _entitlements = StateObject(wrappedValue: entitlements)
+
         self.notificationDelegate = delegate
-        self.entitlements = entitlements
 
-        // Notifications
         UNUserNotificationCenter.current().delegate = delegate
         NotificationManager.shared.registerCategories()
 
@@ -27,18 +33,31 @@ struct Rise_MoveApp: App {
             }
         }
 
-        // Initial entitlement refresh
+        delegate.onStopAction = { alarmID in
+            Task { @MainActor in
+                // Treat notification "Stop" like the user dismissed the alarm.
+                // One-time alarms will disable; repeating alarms will schedule next.
+                store.markAlarmFired(alarmID)
+                router.clearActiveAlarm()
+            }
+        }
+
         Task { @MainActor in
             await entitlements.refreshEntitlements()
             router.isPro = entitlements.isPro
         }
 
-        // Listen for entitlement changes (purchases, renewals, restores, etc.)
         Task.detached {
-            for await _ in Transaction.updates {
-                await entitlements.refreshEntitlements()
-                await MainActor.run {
-                    router.isPro = entitlements.isPro
+            for await result in Transaction.updates {
+                switch result {
+                case .verified(let transaction):
+                    await transaction.finish()
+                    await entitlements.refreshEntitlements()
+                    await MainActor.run {
+                        router.isPro = entitlements.isPro
+                    }
+                case .unverified(_, let error):
+                    logger.error("Unverified transaction update: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }
@@ -48,8 +67,8 @@ struct Rise_MoveApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(router)
+                .environmentObject(store)
                 .environmentObject(entitlements)
-                // Belt + suspenders: refresh on app launch / reattach
                 .task {
                     await entitlements.refreshEntitlements()
                     router.isPro = entitlements.isPro
@@ -60,11 +79,19 @@ struct Rise_MoveApp: App {
 
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     var onAlarmTap: ((UUID) -> Void)?
+    var onStopAction: ((UUID) -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
-        if let idString = response.notification.request.content.userInfo["alarmID"] as? String,
-           let alarmID = UUID(uuidString: idString) {
+        guard
+            let idString = response.notification.request.content.userInfo["alarmID"] as? String,
+            let alarmID = UUID(uuidString: idString)
+        else { return }
+
+        if response.actionIdentifier == "STOP_ACTION" {
+            onStopAction?(alarmID)
+        } else {
+            // Default tap on notification (or any other action): open the alarm screen
             onAlarmTap?(alarmID)
         }
     }
@@ -74,3 +101,4 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         return [.banner, .sound]
     }
 }
+

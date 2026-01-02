@@ -1,10 +1,3 @@
-//
-//  NotificationManager.swift
-//  Rise & Move
-//
-//  Created by Joshua Costanza on 12/29/25.
-//
-
 import Foundation
 import UserNotifications
 
@@ -15,7 +8,6 @@ final class NotificationManager {
     // MARK: - Public API
 
     func registerCategories() {
-        // Foreground action — tapping it opens the app via delegate handling
         let stop = UNNotificationAction(
             identifier: "STOP_ACTION",
             title: "Stop",
@@ -48,7 +40,6 @@ final class NotificationManager {
     }
 
     func scheduleNotification(for alarm: Alarm) async {
-        // Only schedule if enabled
         guard alarm.isEnabled else {
             clearPendingRequests(for: alarm.id)
             return
@@ -59,20 +50,19 @@ final class NotificationManager {
         content.body = alarm.label.isEmpty ? "Time to get up." : alarm.label
         content.sound = .default
 
-        // Routing + actions
         content.categoryIdentifier = "ALARM_CATEGORY"
         content.userInfo = ["alarmID": alarm.id.uuidString]
 
-        // Fire at the next occurrence of the chosen time
-        let calendar = Calendar.current
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+
         let now = Date()
-        var dateComponents = calendar.dateComponents([.hour, .minute], from: alarm.time)
-        dateComponents.second = 0
+        let timeParts = calendar.dateComponents([.hour, .minute], from: alarm.time)
 
         let next = nextFireDate(
             now: now,
-            hour: dateComponents.hour ?? 7,
-            minute: dateComponents.minute ?? 0,
+            hour: timeParts.hour ?? 7,
+            minute: timeParts.minute ?? 0,
             repeatDays: alarm.repeatDays
         )
 
@@ -88,7 +78,6 @@ final class NotificationManager {
             trigger: trigger
         )
 
-        // Replace any existing pending request for this alarm
         clearPendingRequests(for: alarm.id)
 
         do {
@@ -101,41 +90,73 @@ final class NotificationManager {
     // MARK: - Internal helpers
 
     private func nextFireDate(now: Date, hour: Int, minute: Int, repeatDays: Set<Weekday>) -> Date {
-        let calendar = Calendar.current
+        var calendar = Calendar.current
+        calendar.timeZone = .current
 
-        // If no repeat days: schedule next occurrence (today if still in future, else tomorrow)
+        // Build “time of day” components
+        var timeMatch = DateComponents()
+        timeMatch.hour = hour
+        timeMatch.minute = minute
+        timeMatch.second = 0
+
+        // No repeat days: DST-safe “next occurrence of time”
         if repeatDays.isEmpty {
-            var comps = calendar.dateComponents([.year, .month, .day], from: now)
-            comps.hour = hour
-            comps.minute = minute
-            comps.second = 0
-
-            let todayAtTime = calendar.date(from: comps) ?? now
-            if todayAtTime > now { return todayAtTime }
-
-            return calendar.date(byAdding: .day, value: 1, to: todayAtTime) ?? now
+            return calendar.nextDate(
+                after: now,
+                matching: timeMatch,
+                matchingPolicy: .nextTimePreservingSmallerComponents,
+                direction: .forward
+            ) ?? now
         }
 
-        // Repeat days: find next matching weekday (Calendar weekday: 1=Sun ... 7=Sat)
-        let allowed = Set(repeatDays.map { $0.rawValue })
+        // Repeat days: map Weekday.short -> Calendar weekday (1=Sun ... 7=Sat)
+        // This avoids any assumptions about Weekday.rawValue ordering.
+        let allowedWeekdays: [Int] = repeatDays.compactMap { calendarWeekday(fromShort: $0.short) }
 
-        for offset in 0..<7 {
-            guard let candidateDay = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+        var best: Date?
 
-            let weekday = calendar.component(.weekday, from: candidateDay)
-            guard allowed.contains(weekday) else { continue }
+        for weekday in Set(allowedWeekdays) {
+            var match = timeMatch
+            match.weekday = weekday
 
-            var comps = calendar.dateComponents([.year, .month, .day], from: candidateDay)
-            comps.hour = hour
-            comps.minute = minute
-            comps.second = 0
-
-            let candidate = calendar.date(from: comps) ?? candidateDay
-            if candidate > now { return candidate }
+            if let candidate = calendar.nextDate(
+                after: now,
+                matching: match,
+                matchingPolicy: .nextTimePreservingSmallerComponents,
+                direction: .forward
+            ) {
+                if best == nil || candidate < best! {
+                    best = candidate
+                }
+            }
         }
 
-        // Fallback: tomorrow
-        return calendar.date(byAdding: .day, value: 1, to: now) ?? now
+        if let best { return best }
+
+        // Fallback: tomorrow at the chosen time
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
+        var comps = calendar.dateComponents([.year, .month, .day], from: tomorrow)
+        comps.hour = hour
+        comps.minute = minute
+        comps.second = 0
+        return calendar.date(from: comps) ?? tomorrow
+    }
+
+    /// Maps your UI abbreviations to Calendar weekday values (1=Sun ... 7=Sat)
+    private func calendarWeekday(fromShort short: String) -> Int? {
+        let s = short
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        // Accept both 2-letter ("mo") and 3-letter ("mon") forms
+        if s.hasPrefix("su") { return 1 }
+        if s.hasPrefix("mo") { return 2 }
+        if s.hasPrefix("tu") { return 3 }
+        if s.hasPrefix("we") { return 4 }
+        if s.hasPrefix("th") { return 5 }
+        if s.hasPrefix("fr") { return 6 }
+        if s.hasPrefix("sa") { return 7 }
+
+        return nil
     }
 }
-

@@ -18,9 +18,10 @@ final class EntitlementManager: ObservableObject {
         for await result in Transaction.currentEntitlements {
             switch result {
             case .verified(let transaction):
-                if proProductIDs.contains(transaction.productID) {
-                    pro = true
-                }
+                guard proProductIDs.contains(transaction.productID) else { continue }
+                if transaction.revocationDate != nil { continue }
+                if let expirationDate = transaction.expirationDate, expirationDate < Date() { continue }
+                pro = true
             case .unverified(_, _):
                 continue
             }

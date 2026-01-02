@@ -2,8 +2,7 @@
 //  EditAlarmView.swift
 //  Rise & Move
 //
-//  Created by Joshua Costanza on 12/29/25.
-//
+
 import SwiftUI
 
 struct EditAlarmView: View {
@@ -13,6 +12,9 @@ struct EditAlarmView: View {
     @State private var label: String
     @State private var repeatDays: Set<Weekday>
     @State private var isEnabled: Bool
+
+    // Calm “confirm” accent (green, but not neon)
+    private let accent = Color(red: 0.33, green: 0.87, blue: 0.56)
 
     let onSave: (Alarm) -> Void
     let original: Alarm
@@ -29,50 +31,199 @@ struct EditAlarmView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Toggle("Enabled", isOn: $isEnabled)
+            ZStack {
+                dawnBackground
 
-                    DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
-                        .datePickerStyle(.wheel)
+                Form {
+                    statusAndTimeSection
+                    labelSection
+                    repeatSection
                 }
-
-                Section("Label") {
-                    TextField("Alarm label", text: $label)
-                }
-
-                Section("Repeat") {
-                    ForEach(Weekday.allCases) { day in
-                        Toggle(day.short, isOn: Binding(
-                            get: { repeatDays.contains(day) },
-                            set: { isOn in
-                                if isOn { repeatDays.insert(day) }
-                                else { repeatDays.remove(day) }
-                            }
-                        ))
-                    }
-                }
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .tint(accent)
             }
+            .preferredColorScheme(.dark)
             .navigationTitle("Edit Alarm")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        let updated = Alarm(
-                            id: original.id,
-                            time: time,
-                            repeatDays: repeatDays,
-                            isEnabled: isEnabled,
-                            label: label.isEmpty ? "Alarm" : label
-                        )
-                        onSave(updated)
-                        dismiss()
-                    }
+                    Button("Save") { save() }
                 }
             }
         }
+        .modifier(DawnFormStyle())
+    }
+
+    // MARK: - Sections
+
+    private var statusAndTimeSection: some View {
+        Section {
+            Toggle("Enabled", isOn: $isEnabled)
+                .onChange(of: isEnabled) { _, _ in
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+
+            DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
+                .datePickerStyle(.wheel)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+        }
+        .listRowBackground(cardBackground)
+    }
+
+    private var labelSection: some View {
+        Section("Label") {
+            TextField("Alarm label", text: $label)
+                .textInputAutocapitalization(.words)
+                .submitLabel(.done)
+                .onSubmit { hideKeyboard() }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                )
+        }
+        .listRowBackground(cardBackground)
+    }
+
+    private var repeatSection: some View {
+        Section("Repeat") {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
+                ForEach(Weekday.allCases) { day in
+                    DayChip(
+                        title: day.short,
+                        isSelected: repeatDays.contains(day),
+                        accent: accent
+                    ) {
+                        toggleDay(day)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+
+            Text(repeatSummary)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.65))
+                .padding(.top, 2)
+        }
+        .listRowBackground(cardBackground)
+    }
+
+    // MARK: - Save
+
+    private func save() {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let updated = Alarm(
+            id: original.id,
+            time: time,
+            repeatDays: repeatDays,
+            isEnabled: isEnabled,
+            label: trimmed.isEmpty ? "Alarm" : trimmed
+        )
+
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        onSave(updated)
+        dismiss()
+    }
+
+    // MARK: - Repeat helpers
+
+    private func toggleDay(_ day: Weekday) {
+        if repeatDays.contains(day) {
+            repeatDays.remove(day)
+        } else {
+            repeatDays.insert(day)
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private var repeatSummary: String {
+        if repeatDays.isEmpty { return "One-time alarm" }
+        let ordered = Weekday.allCases.filter { repeatDays.contains($0) }
+        let names = ordered.map { $0.short }
+        return "Repeats: " + names.joined(separator: " ")
+    }
+
+    // MARK: - Styling
+
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color.white.opacity(0.06))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            )
+    }
+
+    private var dawnBackground: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.08, green: 0.10, blue: 0.16),
+                Color(red: 0.12, green: 0.13, blue: 0.22),
+                Color(red: 0.24, green: 0.18, blue: 0.20),
+                Color(red: 0.38, green: 0.27, blue: 0.22)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .ignoresSafeArea()
+    }
+
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                        to: nil, from: nil, for: nil)
+    }
+}
+
+// MARK: - Day Chip (same as AddAlarmView)
+
+private struct DayChip: View {
+    let title: String
+    let isSelected: Bool
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.headline)
+                .frame(maxWidth: .infinity, minHeight: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ChipButtonStyle(isSelected: isSelected, accent: accent))
+        .accessibilityLabel(Text(title))
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+}
+
+private struct ChipButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    let accent: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isSelected ? Color.black.opacity(0.95) : Color.white.opacity(0.90))
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? accent : Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isSelected ? accent.opacity(0.85) : Color.white.opacity(0.10), lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

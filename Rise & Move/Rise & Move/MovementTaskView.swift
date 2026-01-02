@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import UIKit
+import CoreHaptics
 
 struct MovementTaskView: View {
     @Environment(\.dismiss) private var dismiss
@@ -16,6 +17,13 @@ struct MovementTaskView: View {
 
     // Haptics: progress buckets
     @State private var lastHapticProgressBucket: Int = -1
+
+    // Haptics generators (reused + prepared)
+    private let holdStartHaptic = UIImpactFeedbackGenerator(style: .soft)
+    private let progressTickHaptic = UIImpactFeedbackGenerator(style: .light)
+    private let releaseNudgeHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let reminderHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let successHaptic = UINotificationFeedbackGenerator()
 
     private let tick = 0.05 // 20 ticks per second
 
@@ -115,6 +123,15 @@ struct MovementTaskView: View {
             isHolding = false
             remindToHold = false
             lastHapticProgressBucket = -1
+
+            // Warm up generators for immediate response
+            prepareHaptics()
+        }
+        // Also keep them warmed if the user is about to interact
+        .onChange(of: isHolding) { newValue in
+            if newValue {
+                prepareHaptics()
+            }
         }
         // Progress timer
         .onReceive(Timer.publish(every: tick, on: .main, in: .common).autoconnect()) { _ in
@@ -126,7 +143,11 @@ struct MovementTaskView: View {
             if elapsed >= secondsRequired {
                 isHolding = false
                 remindToHold = false
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+                if supportsHaptics {
+                    successHaptic.notificationOccurred(.success)
+                }
+
                 onCompleted()
                 dismiss()
             }
@@ -136,9 +157,25 @@ struct MovementTaskView: View {
             guard remindToHold, !isHolding else { return }
             guard elapsed > 0, elapsed < secondsRequired else { return }
 
+            guard supportsHaptics else { return }
+
             // “Hey!” reminder (noticeable, but not harsh)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.9)
+            reminderHaptic.prepare()
+            reminderHaptic.impactOccurred(intensity: 0.95)
         }
+    }
+
+    private var supportsHaptics: Bool {
+        CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    }
+
+    private func prepareHaptics() {
+        guard supportsHaptics else { return }
+        holdStartHaptic.prepare()
+        progressTickHaptic.prepare()
+        releaseNudgeHaptic.prepare()
+        reminderHaptic.prepare()
+        successHaptic.prepare()
     }
 
     private var holdSurface: some View {
@@ -182,7 +219,10 @@ struct MovementTaskView: View {
                     if !isHolding {
                         isHolding = true
                         remindToHold = false // stop reminder as soon as they resume
-                        UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.9)
+
+                        guard supportsHaptics else { return }
+                        holdStartHaptic.prepare()
+                        holdStartHaptic.impactOccurred(intensity: 0.95)
                     }
                 }
                 .onEnded { _ in
@@ -192,8 +232,10 @@ struct MovementTaskView: View {
                         // If they let go mid-task, start reminders
                         if elapsed > 0, elapsed < secondsRequired {
                             remindToHold = true
-                            // Immediate nudge on release
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 1.0)
+
+                            guard supportsHaptics else { return }
+                            releaseNudgeHaptic.prepare()
+                            releaseNudgeHaptic.impactOccurred(intensity: 1.0)
                         } else {
                             remindToHold = false
                         }
@@ -212,8 +254,11 @@ struct MovementTaskView: View {
 
         // Skip 0% and 100%
         guard bucket > 0, bucket < 10 else { return }
+        guard supportsHaptics else { return }
 
-        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.55)
+        // Subtle “tick” every 10%
+        progressTickHaptic.prepare()
+        progressTickHaptic.impactOccurred(intensity: 0.70)
     }
 }
 
