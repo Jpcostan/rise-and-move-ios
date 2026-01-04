@@ -18,6 +18,13 @@ struct MovementTaskView: View {
     // Haptics: progress buckets
     @State private var lastHapticProgressBucket: Int = -1
 
+    // ✅ NEW: Success state + one-shot haptic
+    @State private var showSuccess = false
+    @State private var didFireSuccess = false
+
+    // ✅ NEW: Breathing animation (only while holding)
+    @State private var breathe = false
+
     // Haptics generators (reused + prepared)
     private let holdStartHaptic = UIImpactFeedbackGenerator(style: .soft)
     private let progressTickHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -66,54 +73,11 @@ struct MovementTaskView: View {
             .ignoresSafeArea()
 
             VStack(spacing: 18) {
-                VStack(spacing: 10) {
-                    Text("Rise & Move")
-                        .font(.system(.title2, design: .rounded))
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.white)
-
-                    Text("Stay present for a moment")
-                        .font(.system(.title3, design: .rounded))
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.white.opacity(0.88))
-
-                    Text(remainingSeconds > 0 ? "\(remainingSeconds)s remaining" : "Almost there")
-                        .font(.system(.headline, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.78))
+                if showSuccess {
+                    successState
+                } else {
+                    mainContent
                 }
-                .padding(.top, 6)
-
-                VStack(spacing: 12) {
-                    // Gradient progress (red -> yellow -> green)
-                    GradientProgressBar(progress: progress)
-                        .padding(.horizontal)
-
-                    Text(isHolding ? "Keep holding…" : "Press and hold to stop")
-                        .font(.system(.callout, design: .rounded))
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.white.opacity(0.78))
-                }
-
-                holdSurface
-                    .padding(.top, 6)
-
-                Button {
-                    // Stop any reminder loop
-                    remindToHold = false
-                    dismiss()
-                } label: {
-                    Text("Cancel")
-                        .font(.system(.headline, design: .rounded))
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .foregroundStyle(.white)
-                }
-                .buttonStyle(.bordered)
-                .tint(.white.opacity(0.28)) // visible, but clearly secondary
-                .padding(.horizontal)
-
-                Spacer(minLength: 0)
             }
             .padding(.top, 22)
             .padding(.bottom, 18)
@@ -124,37 +88,43 @@ struct MovementTaskView: View {
             remindToHold = false
             lastHapticProgressBucket = -1
 
+            // ✅ NEW
+            showSuccess = false
+            didFireSuccess = false
+            breathe = false
+
             // Warm up generators for immediate response
             prepareHaptics()
+        }
+        .onDisappear {
+            // ✅ NEW: Ensure no timers/haptics continue if dismissed mid-hold
+            isHolding = false
+            remindToHold = false
+            stopBreathing()
         }
         // Also keep them warmed if the user is about to interact
         .onChange(of: isHolding) { newValue in
             if newValue {
                 prepareHaptics()
+                startBreathing()
+            } else {
+                stopBreathing()
             }
         }
         // Progress timer
         .onReceive(Timer.publish(every: tick, on: .main, in: .common).autoconnect()) { _ in
-            guard isHolding else { return }
+            guard isHolding, !showSuccess else { return }
 
             elapsed += tick
             fireProgressHapticIfNeeded()
 
             if elapsed >= secondsRequired {
-                isHolding = false
-                remindToHold = false
-
-                if supportsHaptics {
-                    successHaptic.notificationOccurred(.success)
-                }
-
-                onCompleted()
-                dismiss()
+                completeSuccess()
             }
         }
         // Reminder haptics timer (fires only when user let go mid-hold)
         .onReceive(Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()) { _ in
-            guard remindToHold, !isHolding else { return }
+            guard remindToHold, !isHolding, !showSuccess else { return }
             guard elapsed > 0, elapsed < secondsRequired else { return }
 
             guard supportsHaptics else { return }
@@ -178,22 +148,150 @@ struct MovementTaskView: View {
         successHaptic.prepare()
     }
 
+    // ✅ NEW: Breathing control (only while holding)
+    private func startBreathing() {
+        breathe = false
+        withAnimation(.easeInOut(duration: 10.0).repeatForever(autoreverses: true)) {
+            breathe = true
+        }
+    }
+
+    private func stopBreathing() {
+        // Stop modulation immediately when not holding
+        breathe = false
+    }
+
+    // ✅ NEW: Completion sequence with success state + perceived delay
+    private func completeSuccess() {
+        guard !showSuccess else { return }
+
+        isHolding = false
+        remindToHold = false
+        showSuccess = true
+
+        // Fire success haptic once
+        if supportsHaptics, !didFireSuccess {
+            didFireSuccess = true
+            successHaptic.notificationOccurred(.success)
+        }
+
+        // Let success state be perceived, then finish
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
+            onCompleted()
+            dismiss()
+        }
+    }
+
+    private var mainContent: some View {
+        VStack(spacing: 18) {
+            headerBlock
+
+            progressBlock
+
+            holdSurface
+                .padding(.top, 6)
+
+            cancelButton
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var headerBlock: some View {
+        VStack(spacing: 10) {
+            Text("Rise & Move")
+                .font(.system(.title2, design: .rounded))
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
+
+            Text("Stay present for a moment")
+                .font(.system(.title3, design: .rounded))
+                .fontWeight(.semibold)
+                .foregroundStyle(.white.opacity(0.88))
+
+            Text(remainingSeconds > 0 ? "\(remainingSeconds)s remaining" : "Almost there")
+                .font(.system(.headline, design: .rounded))
+                .foregroundStyle(.white.opacity(0.78))
+        }
+        .padding(.top, 6)
+    }
+
+    private var progressBlock: some View {
+        VStack(spacing: 12) {
+            // Gradient progress (red -> yellow -> green)
+            GradientProgressBar(progress: progress)
+                .padding(.horizontal)
+
+            // ✅ Copy pass: keep 1 instruction line, avoid repeating "press and hold" twice
+            Text(isHolding ? "Keep holding…" : "Hold to stop the alarm")
+                .font(.system(.callout, design: .rounded))
+                .fontWeight(.semibold)
+                .foregroundStyle(.white.opacity(0.78))
+        }
+    }
+
+    private var cancelButton: some View {
+        Button {
+            // ✅ NEW: Hard-stop task state so Cancel always feels immediate
+            isHolding = false
+            remindToHold = false
+            stopBreathing()
+            dismiss()
+        } label: {
+            Text("Cancel")
+                .font(.system(.callout, design: .rounded))
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .foregroundStyle(.white.opacity(0.88))
+        }
+        .buttonStyle(.bordered)
+        .tint(.white.opacity(0.18)) // visible, but clearly secondary
+        .padding(.horizontal)
+        .disabled(showSuccess)
+    }
+
+    private var successState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 56, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.white.opacity(0.92))
+
+            Text("Done")
+                .font(.system(.title2, design: .rounded))
+                .fontWeight(.semibold)
+                .foregroundStyle(.white.opacity(0.92))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 40)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Done")
+    }
+
     private var holdSurface: some View {
         let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
 
         return ZStack {
             shape
-                .fill(Color.white.opacity(isHolding ? 0.18 : 0.12))
+                .fill(Color.white.opacity(isHolding ? 0.18 : 0.10)) // ✅ tuned: lower idle
                 .overlay(
-                    shape.stroke(Color.white.opacity(isHolding ? 0.34 : 0.18), lineWidth: 1)
+                    shape.stroke(Color.white.opacity(isHolding ? 0.34 : 0.16), lineWidth: 1) // ✅ tuned: lower idle
                 )
                 // Subtle “presence” glow that shifts toward green as they progress
-                .shadow(color: presenceColor.opacity(isHolding ? 0.28 : 0.14),
-                        radius: isHolding ? 22 : 14,
-                        y: 10)
-                .shadow(color: .black.opacity(isHolding ? 0.35 : 0.25),
-                        radius: isHolding ? 18 : 12,
-                        y: 10)
+                .shadow(
+                    color: presenceColor.opacity(
+                        // ✅ PRODUCTION: subtle but perceptible breathing
+                        isHolding ? (breathe ? 0.32 : 0.22) : 0.10
+                    ),
+                    radius: isHolding ? (breathe ? 24 : 20) : 12,
+                    y: 10
+                )
+                .shadow(
+                    color: .black.opacity(isHolding ? 0.35 : 0.22),
+                    radius: isHolding ? 18 : 10,
+                    y: 10
+                )
                 .frame(height: 92)
 
             VStack(spacing: 6) {
@@ -202,7 +300,8 @@ struct MovementTaskView: View {
                     .fontWeight(.bold)
                     .foregroundStyle(.white)
 
-                Text(isHolding ? "Stay steady" : "Press and keep your finger down")
+                // ✅ Copy pass: avoid repeating hold instructions
+                Text(isHolding ? "Stay steady" : "Ready when you are")
                     .font(.system(.callout, design: .rounded))
                     .fontWeight(.semibold)
                     .foregroundStyle(.white.opacity(0.82))
@@ -211,11 +310,14 @@ struct MovementTaskView: View {
         }
         .padding(.horizontal)
         .contentShape(Rectangle())
-        .scaleEffect(isHolding ? 0.995 : 1.0)
+        // ✅ PRODUCTION: subtle but perceptible breathing
+        .scaleEffect(isHolding ? (breathe ? 1.015 : 0.985) : 1.0)
+        .opacity(isHolding ? (breathe ? 1.0 : 0.96) : 1.0)
         .animation(.easeInOut(duration: 0.20), value: isHolding)
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in
+                    guard !showSuccess else { return }
                     if !isHolding {
                         isHolding = true
                         remindToHold = false // stop reminder as soon as they resume
@@ -226,6 +328,7 @@ struct MovementTaskView: View {
                     }
                 }
                 .onEnded { _ in
+                    guard !showSuccess else { return }
                     if isHolding {
                         isHolding = false
 
@@ -245,6 +348,7 @@ struct MovementTaskView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Hold to stop the alarm")
         .accessibilityHint("Press and hold until progress completes")
+        .disabled(showSuccess)
     }
 
     private func fireProgressHapticIfNeeded() {
