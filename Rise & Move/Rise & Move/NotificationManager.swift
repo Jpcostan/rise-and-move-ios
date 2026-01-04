@@ -5,6 +5,16 @@ final class NotificationManager {
     static let shared = NotificationManager()
     private init() {}
 
+    // MARK: - Identifiers
+
+    private func primaryIdentifier(for alarmID: UUID) -> String {
+        "alarm.\(alarmID.uuidString).primary"
+    }
+
+    private func backupIdentifier(for alarmID: UUID) -> String {
+        "alarm.\(alarmID.uuidString).backup"
+    }
+
     // MARK: - Public API
 
     func registerCategories() {
@@ -34,24 +44,38 @@ final class NotificationManager {
         }
     }
 
-    func clearPendingRequests(for alarmID: UUID) {
+    /// Clears any pending notifications for this alarm, including:
+    /// - new identifiers (primary + backup)
+    /// - legacy identifier (alarmID.uuidString) from older builds
+    func clearPendingRequests(for alarmID: UUID) async {
+        let ids = [
+            alarmID.uuidString,                 // legacy
+            primaryIdentifier(for: alarmID),    // new primary
+            backupIdentifier(for: alarmID)      // new backup
+        ]
+
         UNUserNotificationCenter.current()
-            .removePendingNotificationRequests(withIdentifiers: [alarmID.uuidString])
+            .removePendingNotificationRequests(withIdentifiers: ids)
+    }
+    
+    /// Clears only the backup notification for this alarm.
+    /// Also clears the legacy identifier as a safety net (older builds).
+    func clearBackupRequest(for alarmID: UUID) async {
+        let ids = [
+            alarmID.uuidString,              // legacy safety
+            backupIdentifier(for: alarmID)   // new backup
+        ]
+
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: ids)
     }
 
     func scheduleNotification(for alarm: Alarm) async {
+        // If disabled, ensure ALL pending requests are cleared.
         guard alarm.isEnabled else {
-            clearPendingRequests(for: alarm.id)
+            await clearPendingRequests(for: alarm.id)
             return
         }
-
-        let content = UNMutableNotificationContent()
-        content.title = "Rise & Move"
-        content.body = alarm.label.isEmpty ? "Time to get up." : alarm.label
-        content.sound = .default
-
-        content.categoryIdentifier = "ALARM_CATEGORY"
-        content.userInfo = ["alarmID": alarm.id.uuidString]
 
         var calendar = Calendar.current
         calendar.timeZone = .current
@@ -66,26 +90,140 @@ final class NotificationManager {
             repeatDays: alarm.repeatDays
         )
 
-        let triggerComponents = calendar.dateComponents(
+        // Clear anything outstanding first (primary/backup/legacy)
+        await clearPendingRequests(for: alarm.id)
+
+        // ---------------------------
+        // Primary alarm notification
+        // ---------------------------
+        let primaryContent = UNMutableNotificationContent()
+        primaryContent.title = "Rise & Move"
+        primaryContent.body = alarm.label.isEmpty ? "Time to get up." : alarm.label
+        primaryContent.sound = .default
+
+        // ✅ Time Sensitive (does not bypass Silent; may break through Focus if user allows)
+        if #available(iOS 15.0, *) {
+            primaryContent.interruptionLevel = .timeSensitive
+        }
+
+        primaryContent.categoryIdentifier = "ALARM_CATEGORY"
+        primaryContent.userInfo = [
+            "alarmID": alarm.id.uuidString,
+            "kind": "primary"
+        ]
+
+        let primaryTriggerComponents = calendar.dateComponents(
             [.year, .month, .day, .hour, .minute, .second],
             from: next
         )
-        let trigger = UNCalendarNotificationTrigger(dateMatching: triggerComponents, repeats: false)
+        let primaryTrigger = UNCalendarNotificationTrigger(dateMatching: primaryTriggerComponents, repeats: false)
+
+        let primaryRequest = UNNotificationRequest(
+            identifier: primaryIdentifier(for: alarm.id),
+            content: primaryContent,
+            trigger: primaryTrigger
+        )
+
+        do {
+            try await UNUserNotificationCenter.current().add(primaryRequest)
+        } catch {
+            print("Failed to schedule PRIMARY notification:", error)
+        }
+
+        // ---------------------------
+        // Backup alert (follow-up)
+        // ---------------------------
+        guard alarm.backupEnabled else { return }
+
+        let clampedMinutes = min(max(alarm.backupMinutes, 1), 60)
+        let backupFireDate = next.addingTimeInterval(TimeInterval(clampedMinutes * 60))
+
+        let backupContent = UNMutableNotificationContent()
+        backupContent.title = "Rise & Move"
+        backupContent.body =
+            (alarm.label.isEmpty ? "Time to get up." : alarm.label) + " (Backup alert)"
+        backupContent.sound = .default
+
+        if #available(iOS 15.0, *) {
+            backupContent.interruptionLevel = .timeSensitive
+        }
+
+        backupContent.categoryIdentifier = "ALARM_CATEGORY"
+        backupContent.userInfo = [
+            "alarmID": alarm.id.uuidString,
+            "kind": "backup",
+            "backupMinutes": clampedMinutes
+        ]
+
+        let backupTriggerComponents = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second],
+            from: backupFireDate
+        )
+        let backupTrigger = UNCalendarNotificationTrigger(dateMatching: backupTriggerComponents, repeats: false)
+
+        let backupRequest = UNNotificationRequest(
+            identifier: backupIdentifier(for: alarm.id),
+            content: backupContent,
+            trigger: backupTrigger
+        )
+
+        do {
+            try await UNUserNotificationCenter.current().add(backupRequest)
+        } catch {
+            print("Failed to schedule BACKUP notification:", error)
+        }
+    }
+    
+    // MARK: - Test Alarm
+
+    func scheduleTestNotification(secondsFromNow seconds: Int = 15) async {
+        let clamped = min(max(seconds, 5), 60)
+
+        // Build a fake alarm we can show in AlarmRingingView
+        let testAlarmID = UUID()
+        let testAlarmLabel = "Test Alarm"
+
+        let content = UNMutableNotificationContent()
+        content.title = "Rise & Move"
+        content.body = "Test alarm — if you see/hear this, notifications are working."
+        content.sound = .default
+
+        if #available(iOS 15.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+
+        content.categoryIdentifier = "ALARM_CATEGORY"
+
+        // ✅ Include alarmID so NotificationDelegate can parse it
+        // ✅ Include explicit test marker so delegate can route to test flow
+        content.userInfo = [
+            "alarmID": testAlarmID.uuidString,
+            "kind": "test",
+            "isTest": true,
+            "label": testAlarmLabel
+        ]
+
+        let trigger = UNTimeIntervalNotificationTrigger(
+            timeInterval: TimeInterval(clamped),
+            repeats: false
+        )
+
+        let id = "test.\(testAlarmID.uuidString)"
 
         let request = UNNotificationRequest(
-            identifier: alarm.id.uuidString,
+            identifier: id,
             content: content,
             trigger: trigger
         )
 
-        clearPendingRequests(for: alarm.id)
-
         do {
             try await UNUserNotificationCenter.current().add(request)
         } catch {
-            print("Failed to schedule notification:", error)
+            print("Failed to schedule TEST notification:", error)
         }
     }
+
+
 
     // MARK: - Internal helpers
 

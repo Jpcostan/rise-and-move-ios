@@ -4,12 +4,16 @@
 //
 //  Created by Joshua Costanza on 12/29/25.
 //
+
 import Foundation
 import Combine
 
 @MainActor
 final class AppRouter: ObservableObject {
     @Published var activeAlarmID: UUID? = nil
+
+    // ✅ Transient “test alarm” presentation (not persisted)
+    @Published var activeTestAlarm: Alarm? = nil
 
     // Source of truth (typically set from EntitlementManager)
     @Published var isPro: Bool = false
@@ -30,31 +34,26 @@ final class AppRouter: ObservableObject {
     }
 
     // Can the user use the Rise & Move stop right now?
-    // - Pro users: always yes
-    // - Non-Pro: yes only if they haven't used their one free trial yet
     var canUseRiseAndMove: Bool {
         isPro || !hasUsedFreeRiseAndMove
     }
 
-    // Call this after the user successfully completes the movement task once.
     func markFreeRiseAndMoveUsed() {
         guard !hasUsedFreeRiseAndMove else { return }
         hasUsedFreeRiseAndMove = true
         UserDefaults.standard.set(true, forKey: DefaultsKey.hasUsedFreeRiseAndMove)
     }
 
-    // Optional: use this for testing in DEBUG builds
     #if DEBUG
-    // DEBUG-only: force the Paywall to appear even if entitlements say Pro.
-    // Flip to false when you want to test the Pro flow.
     @Published var forcePaywallForTesting: Bool = false
 
-    // DEBUG-only reset to re-test the one-time free trial
     func resetFreeRiseAndMoveTrialForTesting() {
         hasUsedFreeRiseAndMove = false
         UserDefaults.standard.set(false, forKey: DefaultsKey.hasUsedFreeRiseAndMove)
     }
     #endif
+
+    // MARK: - Routing
 
     func openAlarm(id: UUID) {
         activeAlarmID = id
@@ -62,5 +61,29 @@ final class AppRouter: ObservableObject {
 
     func clearActiveAlarm() {
         activeAlarmID = nil
+    }
+
+    // MARK: - Test Alarm Routing
+
+    /// ✅ Preferred: create a test alarm that matches the notification's alarmID.
+    func openTestAlarm(id: UUID, label: String? = nil) {
+        activeTestAlarm = Alarm(
+            id: id,
+            time: Date(),
+            repeatDays: [],
+            isEnabled: true,
+            label: (label?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? label!
+                : "Test Alarm"
+        )
+    }
+
+    /// Back-compat: if any old code still calls openTestAlarm() without args.
+    func openTestAlarm() {
+        openTestAlarm(id: UUID(), label: "Test Alarm")
+    }
+
+    func clearTestAlarm() {
+        activeTestAlarm = nil
     }
 }

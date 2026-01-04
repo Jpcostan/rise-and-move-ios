@@ -35,8 +35,10 @@ final class AlarmStore: ObservableObject {
         alarms.remove(atOffsets: offsets)
 
         // Then clear pending notifications for removed alarms
-        for id in idsToDelete {
-            NotificationManager.shared.clearPendingRequests(for: id)
+        Task {
+            for id in idsToDelete {
+                await NotificationManager.shared.clearPendingRequests(for: id)
+            }
         }
     }
 
@@ -72,8 +74,6 @@ final class AlarmStore: ObservableObject {
 
     private func loadFromDisk() {
         guard let data = UserDefaults.standard.data(forKey: storageKey) else {
-            // First launch: start empty (safer for production than seeding)
-            // If you want a demo alarm for dev builds only, we can add it behind #if DEBUG.
             alarms = []
             return
         }

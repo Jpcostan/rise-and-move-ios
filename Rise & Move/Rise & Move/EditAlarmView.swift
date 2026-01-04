@@ -13,6 +13,10 @@ struct EditAlarmView: View {
     @State private var repeatDays: Set<Weekday>
     @State private var isEnabled: Bool
 
+    // ✅ NEW: Backup alert settings
+    @State private var backupEnabled: Bool
+    @State private var backupMinutes: Int
+
     // Calm “confirm” accent (green, but not neon)
     private let accent = Color(red: 0.33, green: 0.87, blue: 0.56)
 
@@ -27,6 +31,10 @@ struct EditAlarmView: View {
         _label = State(initialValue: alarm.label)
         _repeatDays = State(initialValue: alarm.repeatDays)
         _isEnabled = State(initialValue: alarm.isEnabled)
+
+        // ✅ NEW: init backup values
+        _backupEnabled = State(initialValue: alarm.backupEnabled)
+        _backupMinutes = State(initialValue: alarm.backupMinutes)
     }
 
     var body: some View {
@@ -38,6 +46,7 @@ struct EditAlarmView: View {
                     statusAndTimeSection
                     labelSection
                     repeatSection
+                    backupSection   // ✅ NEW
                 }
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
@@ -119,17 +128,42 @@ struct EditAlarmView: View {
         .listRowBackground(cardBackground)
     }
 
+    // ✅ NEW: Backup alert section
+    private var backupSection: some View {
+        Section("Backup Alert") {
+            Toggle("Backup Alert", isOn: $backupEnabled)
+                .onChange(of: backupEnabled) { _, _ in
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+
+            if backupEnabled {
+                Stepper(value: $backupMinutes, in: 1...60, step: 1) {
+                    Text("After \(backupMinutes) minute\(backupMinutes == 1 ? "" : "s")")
+                }
+
+                Text("Sends a follow-up alert if you haven’t stopped the alarm.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .padding(.top, 2)
+            }
+        }
+        .listRowBackground(cardBackground)
+    }
+
     // MARK: - Save
 
     private func save() {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clampedMinutes = min(max(backupMinutes, 1), 60)
 
         let updated = Alarm(
             id: original.id,
             time: time,
             repeatDays: repeatDays,
             isEnabled: isEnabled,
-            label: trimmed.isEmpty ? "Alarm" : trimmed
+            label: trimmed.isEmpty ? "Alarm" : trimmed,
+            backupEnabled: backupEnabled,
+            backupMinutes: clampedMinutes
         )
 
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
@@ -226,4 +260,3 @@ private struct ChipButtonStyle: ButtonStyle {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
-

@@ -12,6 +12,14 @@ struct AddAlarmView: View {
     @State private var label: String = "Alarm"
     @State private var repeatDays: Set<Weekday> = []
 
+    // ✅ NEW: Backup alert settings
+    @State private var backupEnabled: Bool = false
+    @State private var backupMinutes: Int = 10
+
+    // ✅ NEW: Default enabled depends on notification capability
+    @StateObject private var notificationHealth = NotificationHealth()
+    @State private var isEnabledDefault: Bool = true
+
     // Calm “confirm” accent (green, but not neon)
     private let accent = Color(red: 0.33, green: 0.87, blue: 0.56)
 
@@ -26,6 +34,7 @@ struct AddAlarmView: View {
                     timeSection
                     labelSection
                     repeatSection
+                    backupSection   // ✅ NEW
                 }
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
@@ -47,6 +56,11 @@ struct AddAlarmView: View {
             }
         }
         .modifier(DawnFormStyle())
+        // ✅ NEW: determine default enabled state when the sheet appears
+        .task {
+            await notificationHealth.refresh()
+            isEnabledDefault = notificationHealth.capability.isAlarmCapable
+        }
     }
 
     // MARK: - Sections
@@ -111,10 +125,28 @@ struct AddAlarmView: View {
         .listRowBackground(cardBackground)
     }
 
+    // ✅ NEW: Backup alert section
+    private var backupSection: some View {
+        Section("Backup Alert") {
+            Toggle("Backup Alert", isOn: $backupEnabled)
+
+            if backupEnabled {
+                Stepper(value: $backupMinutes, in: 1...60, step: 1) {
+                    Text("After \(backupMinutes) minute\(backupMinutes == 1 ? "" : "s")")
+                }
+
+                Text("Sends a follow-up alert if you haven’t stopped the alarm.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .padding(.top, 2)
+            }
+        }
+        .listRowBackground(cardBackground)
+    }
+
     // MARK: - Save
 
     private var canSave: Bool {
-        // You can loosen this if you want “always enabled”
         true
     }
 
@@ -124,8 +156,11 @@ struct AddAlarmView: View {
         let newAlarm = Alarm(
             time: time,
             repeatDays: repeatDays,
-            isEnabled: true,
-            label: trimmed.isEmpty ? "Alarm" : trimmed
+            // ✅ CHANGED: default to OFF if notifications aren't alarm-capable
+            isEnabled: isEnabledDefault,
+            label: trimmed.isEmpty ? "Alarm" : trimmed,
+            backupEnabled: backupEnabled,
+            backupMinutes: backupMinutes
         )
 
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
@@ -224,4 +259,3 @@ private struct ChipButtonStyle: ButtonStyle {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
-

@@ -27,9 +27,17 @@ struct Rise_MoveApp: App {
         UNUserNotificationCenter.current().delegate = delegate
         NotificationManager.shared.registerCategories()
 
+        // Existing: open real alarm screen from notification tap
         delegate.onAlarmTap = { alarmID in
             Task { @MainActor in
                 router.openAlarm(id: alarmID)
+            }
+        }
+
+        // ✅ Test notifications: route to test alarm screen
+        delegate.onTestTap = {
+            Task { @MainActor in
+                router.openTestAlarm()
             }
         }
 
@@ -80,18 +88,36 @@ struct Rise_MoveApp: App {
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     var onAlarmTap: ((UUID) -> Void)?
     var onStopAction: ((UUID) -> Void)?
+    var onTestTap: (() -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
+
+        let userInfo = response.notification.request.content.userInfo
+
+        // ✅ Test notifications
+        let kind = userInfo["kind"] as? String
+        let isTest = (userInfo["isTest"] as? Bool) == true
+
+        if kind == "test" || isTest {
+            // These are now present from NotificationManager.scheduleTestNotification(...)
+            // Keeping them here for the next step where we pass details into the router.
+            let _ = userInfo["alarmID"] as? String
+            let _ = userInfo["label"] as? String
+
+            onTestTap?()
+            return
+        }
+
+        // Real alarms require alarmID
         guard
-            let idString = response.notification.request.content.userInfo["alarmID"] as? String,
+            let idString = userInfo["alarmID"] as? String,
             let alarmID = UUID(uuidString: idString)
         else { return }
 
         if response.actionIdentifier == "STOP_ACTION" {
             onStopAction?(alarmID)
         } else {
-            // Default tap on notification (or any other action): open the alarm screen
             onAlarmTap?(alarmID)
         }
     }
@@ -101,4 +127,3 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         return [.banner, .sound]
     }
 }
-

@@ -16,6 +16,10 @@ struct AlarmRingingView: View {
     @State private var audioObservers: [NSObjectProtocol] = []
     @State private var shouldResumeAfterInterruption = false
 
+    // ✅ NEW: Low-volume guardrail
+    @State private var isLowVolume = false
+    private let lowVolumeThreshold: Float = 0.06
+
     // Calm “confirm” accent (matches your other screens)
     private let accent = Color(red: 0.33, green: 0.87, blue: 0.56)
 
@@ -28,6 +32,12 @@ struct AlarmRingingView: View {
             dawnBackground
 
             VStack(spacing: 18) {
+
+                // ✅ NEW: Low-volume banner
+                if isLowVolume {
+                    lowVolumeBanner
+                }
+
                 header
 
                 Text(alarm.time, style: .time)
@@ -100,6 +110,16 @@ struct AlarmRingingView: View {
         .onAppear {
             configureAudioSessionAndStart()
             installAudioObservers()
+
+            // ✅ NEW: initial volume check
+            updateLowVolumeWarning()
+        }
+        // ✅ NEW: poll volume so banner updates while ringing
+        .task {
+            while !Task.isCancelled {
+                updateLowVolumeWarning()
+                try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
+            }
         }
         .onDisappear {
             removeAudioObservers()
@@ -138,6 +158,34 @@ struct AlarmRingingView: View {
         .ignoresSafeArea()
     }
 
+    // ✅ NEW: Low-volume banner view
+    private var lowVolumeBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speaker.slash.fill")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.white.opacity(0.9))
+
+            Text("Volume is low — turn it up to hear the alarm.")
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .padding(.bottom, 2)
+        .accessibilityLabel("Volume is low. Turn it up to hear the alarm.")
+    }
+
     private var header: some View {
         VStack(spacing: 6) {
             Text("Rise & Move")
@@ -172,8 +220,22 @@ struct AlarmRingingView: View {
 
     private func stopAndClose() {
         stopSoundAndDeactivateSession()
+
+        // ✅ Cancel backup alert so it doesn't fire after the user stops the alarm
+        Task {
+            await NotificationManager.shared.clearBackupRequest(for: alarm.id)
+        }
+
         onStop()
         router.clearActiveAlarm()
+    }
+
+    // MARK: - Low volume detection
+
+    // ✅ NEW
+    private func updateLowVolumeWarning() {
+        let vol = AVAudioSession.sharedInstance().outputVolume
+        isLowVolume = vol <= lowVolumeThreshold
     }
 
     // MARK: - Audio session + playback
@@ -299,6 +361,9 @@ struct AlarmRingingView: View {
         @unknown default:
             break
         }
+
+        // ✅ NEW: refresh volume warning after interruptions
+        updateLowVolumeWarning()
     }
 
     private func handleRouteChange(_ note: Notification) {
@@ -322,6 +387,9 @@ struct AlarmRingingView: View {
         default:
             break
         }
+
+        // ✅ NEW: refresh volume warning after route changes
+        updateLowVolumeWarning()
     }
 }
 
@@ -403,4 +471,3 @@ private struct OptionCardButton: View {
         .accessibilityHint(Text(subtitle))
     }
 }
-
