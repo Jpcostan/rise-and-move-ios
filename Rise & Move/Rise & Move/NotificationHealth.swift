@@ -9,6 +9,7 @@ import Foundation
 import Combine
 import UserNotifications
 import SwiftUI
+import UIKit
 
 @MainActor
 final class NotificationHealth: ObservableObject {
@@ -99,7 +100,7 @@ final class NotificationHealth: ObservableObject {
             return
         }
 
-        // ✅ NEW: “Authorized” but sounds disabled (also real)
+        // “Authorized” but sounds disabled (also real)
         if settings.soundSetting != .enabled {
             capability = .soundsDisabled
             return
