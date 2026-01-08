@@ -27,9 +27,18 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var notificationHealth = NotificationHealth()
 
+    // ✅ Volume guardrail (soft banner)
+    @StateObject private var volumeMonitor = VolumeMonitor()
+    @State private var showingVolumeHelp = false
+
     // ✅ Toggle guardrail state
     @State private var showNotificationsGate = false
     @State private var pendingToggleAlarmID: UUID? = nil
+
+    // ✅ NEW: Helps avoid doing volume monitoring / banners while ringing
+    private var isRingingOrTesting: Bool {
+        router.activeAlarmID != nil || router.activeTestAlarm != nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -37,7 +46,7 @@ struct ContentView: View {
                 dawnBackground
 
                 VStack(spacing: 0) {
-                    // ✅ Banner only when notifications aren't alarm-capable
+                    // ✅ Banner #1 (hard): Notifications aren't alarm-capable
                     if !notificationHealth.capability.isAlarmCapable {
                         NotificationDisabledBanner(
                             title: notificationHealth.capability.title,
@@ -49,6 +58,20 @@ struct ContentView: View {
                             } else {
                                 notificationHealth.openAppSettings()
                             }
+                        }
+                    }
+
+                    // ✅ Banner #2 (soft): Volume is very low (only show if notifications are OK)
+                    // ✅ IMPORTANT: don't show while ringing / testing
+                    if !isRingingOrTesting,
+                       notificationHealth.capability.isAlarmCapable,
+                       volumeMonitor.isLowStable {
+                        NotificationDisabledBanner(
+                            title: "Volume is low",
+                            message: "You may not hear the alarm sound. Turn up volume to be safe.",
+                            ctaTitle: "How to fix"
+                        ) {
+                            showingVolumeHelp = true
                         }
                     }
 
@@ -108,6 +131,17 @@ struct ContentView: View {
                     }
                     .accessibilityLabel("Add alarm")
                 }
+            }
+
+            // ✅ Volume help
+            .alert("Turn Up Volume", isPresented: $showingVolumeHelp) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("""
+                Use the side volume buttons or Control Center to raise the media volume.
+
+                Tip: Run “Send Test Alarm” in Settings to confirm you can hear it.
+                """)
             }
 
             // Settings sheet
@@ -192,22 +226,52 @@ struct ContentView: View {
                 Text(notificationHealth.capability.message)
             }
 
-            // Existing: initial permission request
+            // ✅ Existing: initial permission request
             .task {
                 guard !didRequestNotifications else { return }
                 didRequestNotifications = true
                 _ = await NotificationManager.shared.requestAuthorization()
             }
 
-            // Keep notification status current
+            // ✅ Keep notification status current
             .task {
                 await notificationHealth.refresh()
             }
-            .onChange(of: scenePhase) { _, newValue in
-                if newValue == .active {
-                    Task { await notificationHealth.refresh() }
+
+            // ✅ Start/stop VolumeMonitor while ContentView is alive (but don't fight active alarms)
+            .onAppear {
+                if !isRingingOrTesting {
+                    volumeMonitor.start()
                 }
             }
+            .onDisappear {
+                volumeMonitor.stop()
+            }
+
+            // ✅ CHANGED: Scene phase handling
+            // - Start on .active (unless ringing)
+            // - Stop only on .background
+            // - Do nothing on .inactive (notification taps often pass through inactive)
+            .onChange(of: scenePhase) { _, newValue in
+                switch newValue {
+                case .active:
+                    Task { await notificationHealth.refresh() }
+                    if !isRingingOrTesting {
+                        volumeMonitor.start()
+                    }
+
+                case .background:
+                    volumeMonitor.stop()
+
+                case .inactive:
+                    // ✅ Do nothing to avoid session churn during transitions.
+                    break
+
+                @unknown default:
+                    break
+                }
+            }
+
             // ✅ If a notification tries to open an alarm while a sheet is up,
             // dismiss sheets so the fullScreenCover can present.
             .onChange(of: router.activeTestAlarm) { _, newValue in
@@ -215,6 +279,9 @@ struct ContentView: View {
                 showingSettings = false
                 showingAddAlarm = false
                 editingAlarmItem = nil
+
+                // ✅ Stop volume monitoring during ringing/test alarm
+                volumeMonitor.stop()
             }
 
             .onChange(of: router.activeAlarmID) { _, newValue in
@@ -222,6 +289,9 @@ struct ContentView: View {
                 showingSettings = false
                 showingAddAlarm = false
                 editingAlarmItem = nil
+
+                // ✅ Stop volume monitoring during ringing
+                volumeMonitor.stop()
             }
         }
     }

@@ -13,6 +13,9 @@ struct EditAlarmView: View {
     @State private var repeatDays: Set<Weekday>
     @State private var isEnabled: Bool
 
+    // ✅ NEW: Track whether user explicitly changed enabled state in this edit session
+    @State private var didChangeEnabled: Bool = false
+
     // ✅ NEW: Backup alert settings
     @State private var backupEnabled: Bool
     @State private var backupMinutes: Int
@@ -46,7 +49,7 @@ struct EditAlarmView: View {
                     statusAndTimeSection
                     labelSection
                     repeatSection
-                    backupSection   // ✅ NEW
+                    backupSection
                 }
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
@@ -74,6 +77,7 @@ struct EditAlarmView: View {
         Section {
             Toggle("Enabled", isOn: $isEnabled)
                 .onChange(of: isEnabled) { _, _ in
+                    didChangeEnabled = true
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }
 
@@ -128,12 +132,18 @@ struct EditAlarmView: View {
         .listRowBackground(cardBackground)
     }
 
-    // ✅ NEW: Backup alert section
+    // MARK: - Backup alert section
+
     private var backupSection: some View {
         Section("Backup Alert") {
             Toggle("Backup Alert", isOn: $backupEnabled)
-                .onChange(of: backupEnabled) { _, _ in
+                .onChange(of: backupEnabled) { _, newValue in
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+                    // Optional UX: if user turns it off, reset minutes to original so it doesn't "drift"
+                    if newValue == false {
+                        backupMinutes = original.backupMinutes
+                    }
                 }
 
             if backupEnabled {
@@ -156,11 +166,14 @@ struct EditAlarmView: View {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
         let clampedMinutes = min(max(backupMinutes, 1), 60)
 
+        // ✅ Preserve enabled state unless user explicitly changed it
+        let finalEnabled = didChangeEnabled ? isEnabled : original.isEnabled
+
         let updated = Alarm(
             id: original.id,
             time: time,
             repeatDays: repeatDays,
-            isEnabled: isEnabled,
+            isEnabled: finalEnabled,
             label: trimmed.isEmpty ? "Alarm" : trimmed,
             backupEnabled: backupEnabled,
             backupMinutes: clampedMinutes

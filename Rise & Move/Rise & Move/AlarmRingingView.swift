@@ -16,9 +16,16 @@ struct AlarmRingingView: View {
     @State private var audioObservers: [NSObjectProtocol] = []
     @State private var shouldResumeAfterInterruption = false
 
-    // ✅ NEW: Low-volume guardrail
+    // ✅ Low-volume guardrail
     @State private var isLowVolume = false
     private let lowVolumeThreshold: Float = 0.06
+
+    // ✅ NEW: KVO observer for outputVolume (more reliable than polling)
+    @State private var volumeObserver: NSKeyValueObservation?
+
+    // ✅ Stop press-and-hold
+    @State private var stopHoldProgress: CGFloat = 0
+    private let stopHoldDuration: TimeInterval = 0.7
 
     // Calm “confirm” accent (matches your other screens)
     private let accent = Color(red: 0.33, green: 0.87, blue: 0.56)
@@ -31,101 +38,53 @@ struct AlarmRingingView: View {
         ZStack {
             dawnBackground
 
-            VStack(spacing: 18) {
+            VStack(spacing: 0) {
+                // Card content
+                VStack(spacing: 18) {
+                    // ✅ Low-volume banner
+                    if isLowVolume {
+                        lowVolumeBanner
+                    }
 
-                // ✅ NEW: Low-volume banner
-                if isLowVolume {
-                    lowVolumeBanner
+                    header
+
+                    Text(alarm.time, style: .time)
+                        .font(.system(size: 64, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.top, 6)
+
+                    // ✅ Push actions to the bottom
+                    Spacer(minLength: 0)
+
+                    actionStack
                 }
-
-                header
-
-                Text(alarm.time, style: .time)
-                    .font(.system(size: 64, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
-                    .padding(.top, 6)
-
-                Spacer(minLength: 18)
-
-                VStack(spacing: 12) {
-                    OptionCardButton(
-                        title: riseAndMoveTitle,
-                        subtitle: riseAndMoveSubtitle,
-                        leadingSystemImage: canUseRiseAndMove ? "figure.walk.motion" : "lock.fill",
-                        badgeText: riseAndMoveBadgeText,
-                        isPrimary: true,
-                        isLocked: !canUseRiseAndMove,
-                        accent: accent
-                    ) {
-                        #if DEBUG
-                        if router.forcePaywallForTesting {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            showingPaywall = true
-                            return
-                        }
-                        #endif
-
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-
-                        if canUseRiseAndMove {
-                            showingMovementTask = true
-                        } else {
-                            showingPaywall = true
-                        }
-                    }
-
-                    OptionCardButton(
-                        title: "Stop",
-                        subtitle: "Stops the alarm right away.",
-                        leadingSystemImage: "hand.tap",
-                        badgeText: nil,
-                        isPrimary: false,
-                        isLocked: false,
-                        accent: accent
-                    ) {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        stopAndClose()
-                    }
-
-                    #if DEBUG
-                    if router.forcePaywallForTesting {
-                        Text("DEBUG: Paywall forced ON")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.70))
-                            .padding(.top, 2)
-                    }
-                    #endif
-                }
+                .padding(20)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(.white.opacity(0.10), lineWidth: 1)
+                )
+                .padding(.horizontal, 18)
+                .padding(.vertical, 22)
             }
-            .padding(20)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(.white.opacity(0.10), lineWidth: 1)
-            )
-            .padding(.horizontal, 18)
-            .padding(.vertical, 22)
         }
         .onAppear {
             configureAudioSessionAndStart()
             installAudioObservers()
 
-            // ✅ NEW: initial volume check
-            updateLowVolumeWarning()
-        }
-        // ✅ NEW: poll volume so banner updates while ringing
-        .task {
-            while !Task.isCancelled {
-                updateLowVolumeWarning()
-                try? await Task.sleep(nanoseconds: 400_000_000) // 0.4s
-            }
+            // ✅ Start KVO volume monitoring (updates without the user pressing buttons)
+            startVolumeMonitoring()
+
+            // ✅ Initial + delayed sync (outputVolume can be stale right after activation)
+            syncLowVolumeAfterActivation()
         }
         .onDisappear {
+            stopVolumeMonitoring()
+
             removeAudioObservers()
             stopSoundAndDeactivateSession()
         }
-
         .sheet(isPresented: $showingMovementTask) {
             MovementTaskView(secondsRequired: 20) {
                 if !router.isPro {
@@ -134,7 +93,6 @@ struct AlarmRingingView: View {
                 stopAndClose()
             }
         }
-
         .sheet(isPresented: $showingPaywall) {
             PaywallView {
                 router.isPro = entitlements.isPro
@@ -158,7 +116,6 @@ struct AlarmRingingView: View {
         .ignoresSafeArea()
     }
 
-    // ✅ NEW: Low-volume banner view
     private var lowVolumeBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "speaker.slash.fill")
@@ -200,6 +157,60 @@ struct AlarmRingingView: View {
         .padding(.top, 6)
     }
 
+    private var actionStack: some View {
+        VStack(spacing: 12) {
+            OptionCardButton(
+                title: riseAndMoveTitle,
+                subtitle: riseAndMoveSubtitle,
+                leadingSystemImage: canUseRiseAndMove ? "figure.walk.motion" : "lock.fill",
+                badgeText: riseAndMoveBadgeText,
+                isPrimary: true,
+                isLocked: !canUseRiseAndMove,
+                accent: accent
+            ) {
+                #if DEBUG
+                if router.forcePaywallForTesting {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    showingPaywall = true
+                    return
+                }
+                #endif
+
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+                if canUseRiseAndMove {
+                    showingMovementTask = true
+                } else {
+                    showingPaywall = true
+                }
+            }
+
+            // ✅ Stop is press-and-hold (prevents fat-finger “Stop”)
+            HoldToStopCard(
+                title: "Stop",
+                subtitle: "Press and hold to stop.",
+                leadingSystemImage: "hand.tap",
+                accent: accent,
+                holdDuration: stopHoldDuration,
+                progress: $stopHoldProgress
+            ) {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                stopAndClose()
+            }
+
+            #if DEBUG
+            if router.forcePaywallForTesting {
+                Text("DEBUG: Paywall forced ON")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.70))
+                    .padding(.top, 2)
+            }
+            #endif
+        }
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+    }
+
     // MARK: - Copy
 
     private var riseAndMoveTitle: String { "Rise & Move Stop" }
@@ -221,7 +232,7 @@ struct AlarmRingingView: View {
     private func stopAndClose() {
         stopSoundAndDeactivateSession()
 
-        // ✅ Cancel backup alert so it doesn't fire after the user stops the alarm
+        // Cancel backup alert so it doesn't fire after the user stops the alarm
         Task {
             await NotificationManager.shared.clearBackupRequest(for: alarm.id)
         }
@@ -232,7 +243,33 @@ struct AlarmRingingView: View {
 
     // MARK: - Low volume detection
 
-    // ✅ NEW
+    private func startVolumeMonitoring() {
+        guard volumeObserver == nil else { return }
+
+        let session = AVAudioSession.sharedInstance()
+        volumeObserver = session.observe(\.outputVolume, options: [.initial, .new]) { _, _ in
+            Task { @MainActor in
+                updateLowVolumeWarning()
+            }
+        }
+    }
+
+    private func stopVolumeMonitoring() {
+        volumeObserver?.invalidate()
+        volumeObserver = nil
+    }
+
+    /// outputVolume can be stale right after setActive(true); do a few delayed reads.
+    private func syncLowVolumeAfterActivation() {
+        Task { @MainActor in
+            updateLowVolumeWarning()
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
+            updateLowVolumeWarning()
+            try? await Task.sleep(nanoseconds: 800_000_000) // 0.8s
+            updateLowVolumeWarning()
+        }
+    }
+
     private func updateLowVolumeWarning() {
         let vol = AVAudioSession.sharedInstance().outputVolume
         isLowVolume = vol <= lowVolumeThreshold
@@ -244,8 +281,6 @@ struct AlarmRingingView: View {
         let session = AVAudioSession.sharedInstance()
 
         do {
-            // Playback ensures the alarm plays even with the Silent switch enabled.
-            // Duck others so music/podcasts lower volume while alarm rings.
             try session.setCategory(
                 .playback,
                 mode: .default,
@@ -255,10 +290,13 @@ struct AlarmRingingView: View {
             try session.setActive(true)
 
             startSound()
+
+            // ✅ Ensure volume state reflects reality after session activation
+            syncLowVolumeAfterActivation()
         } catch {
             print("Audio session setup failed:", error)
-            // Still attempt sound playback (may work on some devices/states).
             startSound()
+            syncLowVolumeAfterActivation()
         }
     }
 
@@ -290,7 +328,6 @@ struct AlarmRingingView: View {
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         } catch {
-            // Non-fatal; keep going.
             print("Failed to deactivate audio session:", error)
         }
     }
@@ -336,15 +373,11 @@ struct AlarmRingingView: View {
 
         switch type {
         case .began:
-            // Remember whether we were playing, so we can resume if iOS allows.
             shouldResumeAfterInterruption = (player?.isPlaying == true)
             player?.pause()
 
         case .ended:
-            guard
-                let optionsRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt
-            else { return }
-
+            guard let optionsRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
 
             if options.contains(.shouldResume), shouldResumeAfterInterruption {
@@ -362,7 +395,6 @@ struct AlarmRingingView: View {
             break
         }
 
-        // ✅ NEW: refresh volume warning after interruptions
         updateLowVolumeWarning()
     }
 
@@ -373,12 +405,9 @@ struct AlarmRingingView: View {
             let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw)
         else { return }
 
-        // Common case: Bluetooth device disconnected mid-alarm.
-        // Restarting playback helps iOS re-route to the new output reliably.
         switch reason {
         case .oldDeviceUnavailable, .newDeviceAvailable, .categoryChange, .override, .routeConfigurationChange:
             if player != nil {
-                // Restart the player to force re-route.
                 let wasPlaying = (player?.isPlaying == true)
                 player?.stop()
                 player?.currentTime = 0
@@ -388,8 +417,117 @@ struct AlarmRingingView: View {
             break
         }
 
-        // ✅ NEW: refresh volume warning after route changes
         updateLowVolumeWarning()
+    }
+}
+
+// MARK: - Hold-to-stop card
+
+private struct HoldToStopCard: View {
+    let title: String
+    let subtitle: String
+    let leadingSystemImage: String
+    let accent: Color
+    let holdDuration: TimeInterval
+
+    @Binding var progress: CGFloat
+    let onComplete: () -> Void
+
+    @State private var holdTask: Task<Void, Never>?
+
+    var body: some View {
+        Button {} label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.10))
+                        .frame(width: 42, height: 42)
+                        .overlay(Circle().stroke(Color.white.opacity(0.10), lineWidth: 1))
+
+                    Image(systemName: leadingSystemImage)
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .font(.system(size: 18, weight: .semibold))
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+
+                Spacer()
+
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 3)
+                        .frame(width: 22, height: 22)
+
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(accent.opacity(0.95), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .frame(width: 22, height: 22)
+                        .rotationEffect(.degrees(-90))
+                }
+                .opacity(progress > 0 ? 1 : 0.55)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: holdDuration)
+                .onEnded { _ in
+                    holdTask?.cancel()
+                    holdTask = nil
+                    progress = 0
+                    onComplete()
+                }
+        )
+        .onLongPressGesture(minimumDuration: 0.01, pressing: { pressing in
+            if pressing {
+                startProgress()
+            } else {
+                cancelProgress()
+            }
+        }, perform: {})
+        .accessibilityHint(Text("Press and hold to stop the alarm"))
+    }
+
+    private func startProgress() {
+        holdTask?.cancel()
+        progress = 0
+
+        let steps = 20
+        let stepNanos = UInt64((holdDuration / Double(steps)) * 1_000_000_000)
+
+        holdTask = Task { @MainActor in
+            for i in 1...steps {
+                if Task.isCancelled { return }
+                progress = CGFloat(i) / CGFloat(steps)
+                try? await Task.sleep(nanoseconds: stepNanos)
+            }
+        }
+    }
+
+    private func cancelProgress() {
+        holdTask?.cancel()
+        holdTask = nil
+        withAnimation(.easeOut(duration: 0.12)) {
+            progress = 0
+        }
     }
 }
 

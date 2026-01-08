@@ -73,7 +73,7 @@ struct Rise_MoveApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
                 .environmentObject(router)
                 .environmentObject(store)
                 .environmentObject(entitlements)
@@ -81,6 +81,29 @@ struct Rise_MoveApp: App {
                     await entitlements.refreshEntitlements()
                     router.isPro = entitlements.isPro
                 }
+        }
+    }
+}
+
+/// Decides whether to show onboarding or the main app.
+/// Stored locally in UserDefaults via AppStorage.
+private struct RootView: View {
+    @EnvironmentObject private var router: AppRouter
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
+
+    var body: some View {
+        if hasCompletedOnboarding {
+            ContentView()
+        } else {
+            OnboardingFlowView(
+                onFinish: {
+                    hasCompletedOnboarding = true
+                },
+                onTryTestAlarm: {
+                    // Optional CTA. Doesn’t mark onboarding complete.
+                    router.openTestAlarm()
+                }
+            )
         }
     }
 }
@@ -100,8 +123,6 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let isTest = (userInfo["isTest"] as? Bool) == true
 
         if kind == "test" || isTest {
-            // These are now present from NotificationManager.scheduleTestNotification(...)
-            // Keeping them here for the next step where we pass details into the router.
             let _ = userInfo["alarmID"] as? String
             let _ = userInfo["label"] as? String
 
