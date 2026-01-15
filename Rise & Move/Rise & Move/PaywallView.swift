@@ -18,9 +18,18 @@ struct PaywallView: View {
     @State private var actionMessage: String?
     @State private var purchasingProductID: String?
 
+    /// ✅ Called when Pro successfully unlocks.
     let onPurchased: () -> Void
 
-    private let productIDs = ["rise_move_monthly", "rise_move_yearly"]
+    /// ✅ Called when the user closes the paywall (clears router paywall context).
+    /// This is critical now that the paywall is presented from a single global sheet in ContentView.
+    let onClose: () -> Void
+
+    // ✅ MUST match App Store Connect product IDs exactly
+    private let proMonthlyID = "com.jpcostan.riseandmove.pro.monthly"
+    private let proYearlyID  = "com.jpcostan.riseandmove.pro.yearly"
+
+    private var productIDs: [String] { [proMonthlyID, proYearlyID] }
 
     var body: some View {
         NavigationStack {
@@ -52,12 +61,22 @@ struct PaywallView: View {
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") { close() }
                         .foregroundStyle(.white)
                 }
             }
             .task { await loadProducts() }
         }
+    }
+
+    // MARK: - Close handling
+
+    @MainActor
+    private func close() {
+        // ✅ Clear router-driven presentation state first
+        onClose()
+        // ✅ Then dismiss the sheet (safe even if already dismissed)
+        dismiss()
     }
 
     // MARK: - UI
@@ -122,7 +141,6 @@ struct PaywallView: View {
 
     private var plans: some View {
         VStack(spacing: 12) {
-            // Trust line
             Text("Cancel anytime. Restore available. No ads.")
                 .font(.system(.footnote, design: .rounded))
                 .foregroundStyle(.white.opacity(0.70))
@@ -131,7 +149,7 @@ struct PaywallView: View {
 
             VStack(spacing: 10) {
                 ForEach(productsSortedForDisplay, id: \.id) { product in
-                    let isYearly = product.id.contains("yearly")
+                    let isYearly = (product.id == proYearlyID)
 
                     Button {
                         Task { await purchase(product) }
@@ -268,21 +286,21 @@ struct PaywallView: View {
     // MARK: - Sorting & Copy
 
     private var productsSortedForDisplay: [Product] {
-        // Prefer yearly first (best value), then monthly.
-        let yearly = products.filter { $0.id.contains("yearly") }
-        let monthly = products.filter { $0.id.contains("monthly") }
-        return yearly + monthly
+        let yearly = products.filter { $0.id == proYearlyID }
+        let monthly = products.filter { $0.id == proMonthlyID }
+        let others = products.filter { ![proYearlyID, proMonthlyID].contains($0.id) }
+        return yearly + monthly + others
     }
 
     private func planTitle(for product: Product) -> String {
-        if product.id.contains("yearly") { return "Yearly" }
-        if product.id.contains("monthly") { return "Monthly" }
+        if product.id == proYearlyID { return "Yearly" }
+        if product.id == proMonthlyID { return "Monthly" }
         return product.displayName
     }
 
     private func planSubtitle(for product: Product) -> String {
-        if product.id.contains("yearly") { return "One payment, full year of Pro" }
-        if product.id.contains("monthly") { return "Flexible month to month" }
+        if product.id == proYearlyID { return "One payment, full year of Pro" }
+        if product.id == proMonthlyID { return "Flexible month to month" }
         return product.description
     }
 
@@ -292,14 +310,17 @@ struct PaywallView: View {
         isLoading = true
         loadErrorMessage = nil
         actionMessage = nil
+
         do {
-            products = try await Product.products(for: productIDs)
+            let ids = productIDs
+            products = try await Product.products(for: ids)
+
             if products.isEmpty {
-                StoreKitSupport.logger.error("No products returned for ids: \(self.productIDs, privacy: .public)")
+                StoreKitSupport.logger.error("No products returned for ids: \(ids, privacy: .public)")
                 loadErrorMessage = "Subscriptions are unavailable right now. Please try again later."
             } else {
                 let returnedIDs = Set(products.map(\.id))
-                let missing = productIDs.filter { !returnedIDs.contains($0) }
+                let missing = ids.filter { !returnedIDs.contains($0) }
                 if !missing.isEmpty {
                     StoreKitSupport.logger.error("Missing products for ids: \(missing, privacy: .public)")
                 }
@@ -308,6 +329,7 @@ struct PaywallView: View {
             StoreKitSupport.logger.error("Failed to load products: \(error.localizedDescription, privacy: .public)")
             loadErrorMessage = StoreKitSupport.userMessage(for: error, context: .loadProducts)
         }
+
         isLoading = false
     }
 
@@ -326,7 +348,7 @@ struct PaywallView: View {
                     await entitlements.refreshEntitlements()
                     if entitlements.isPro {
                         onPurchased()
-                        dismiss()
+                        close()
                     } else {
                         actionMessage = "Purchase completed, but Pro hasn’t unlocked yet. Please try Restore Purchases."
                     }
@@ -356,7 +378,7 @@ struct PaywallView: View {
             await entitlements.refreshEntitlements()
             if entitlements.isPro {
                 onPurchased()
-                dismiss()
+                close()
             } else {
                 actionMessage = "No active subscription found to restore."
             }
@@ -377,9 +399,7 @@ enum StoreKitSupport {
     }
 
     static func userMessage(for error: Error, context: Context) -> String? {
-        if isCancellation(error) {
-            return nil
-        }
+        if isCancellation(error) { return nil }
 
         let nsError = error as NSError
 
@@ -422,15 +442,12 @@ enum StoreKitSupport {
     }
 
     static func isCancellation(_ error: Error) -> Bool {
-        if error is CancellationError {
-            return true
-        }
+        if error is CancellationError { return true }
 
         let nsError = error as NSError
         if nsError.domain == SKErrorDomain, nsError.code == SKError.paymentCancelled.rawValue {
             return true
         }
-
         return false
     }
 }

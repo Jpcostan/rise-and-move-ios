@@ -3,14 +3,22 @@ import AVFoundation
 
 struct AlarmRingingView: View {
     @EnvironmentObject private var router: AppRouter
-    @EnvironmentObject private var entitlements: EntitlementManager
 
     let alarm: Alarm
     let onStop: () -> Void
 
+    /// ✅ If true, this is a test alarm (from onboarding/settings).
+    /// Test alarms should NEVER paywall and should NEVER consume the free try.
+    let isTestMode: Bool
+
+    init(alarm: Alarm, isTestMode: Bool = false, onStop: @escaping () -> Void) {
+        self.alarm = alarm
+        self.isTestMode = isTestMode
+        self.onStop = onStop
+    }
+
     @State private var player: AVAudioPlayer?
     @State private var showingMovementTask = false
-    @State private var showingPaywall = false
 
     // Audio state
     @State private var audioObservers: [NSObjectProtocol] = []
@@ -20,7 +28,7 @@ struct AlarmRingingView: View {
     @State private var isLowVolume = false
     private let lowVolumeThreshold: Float = 0.06
 
-    // ✅ NEW: KVO observer for outputVolume (more reliable than polling)
+    // ✅ KVO observer for outputVolume
     @State private var volumeObserver: NSKeyValueObservation?
 
     // ✅ Stop press-and-hold
@@ -30,8 +38,9 @@ struct AlarmRingingView: View {
     // Calm “confirm” accent (matches your other screens)
     private let accent = Color(red: 0.33, green: 0.87, blue: 0.56)
 
+    /// ✅ In test mode we ALWAYS allow Rise & Move (no paywall, no “free try” consumption)
     private var canUseRiseAndMove: Bool {
-        router.canUseRiseAndMove
+        isTestMode ? true : router.canUseRiseAndMove
     }
 
     var body: some View {
@@ -39,9 +48,7 @@ struct AlarmRingingView: View {
             dawnBackground
 
             VStack(spacing: 0) {
-                // Card content
                 VStack(spacing: 18) {
-                    // ✅ Low-volume banner
                     if isLowVolume {
                         lowVolumeBanner
                     }
@@ -54,7 +61,6 @@ struct AlarmRingingView: View {
                         .foregroundStyle(.white)
                         .padding(.top, 6)
 
-                    // ✅ Push actions to the bottom
                     Spacer(minLength: 0)
 
                     actionStack
@@ -73,29 +79,22 @@ struct AlarmRingingView: View {
             configureAudioSessionAndStart()
             installAudioObservers()
 
-            // ✅ Start KVO volume monitoring (updates without the user pressing buttons)
             startVolumeMonitoring()
-
-            // ✅ Initial + delayed sync (outputVolume can be stale right after activation)
             syncLowVolumeAfterActivation()
         }
         .onDisappear {
             stopVolumeMonitoring()
-
             removeAudioObservers()
             stopSoundAndDeactivateSession()
         }
         .sheet(isPresented: $showingMovementTask) {
             MovementTaskView(secondsRequired: 20) {
-                if !router.isPro {
+                // ✅ IMPORTANT:
+                // Only consume the free try for REAL alarms (and never in test mode).
+                if !isTestMode, !router.effectiveIsPro {
                     router.markFreeRiseAndMoveUsed()
                 }
                 stopAndClose()
-            }
-        }
-        .sheet(isPresented: $showingPaywall) {
-            PaywallView {
-                router.isPro = entitlements.isPro
             }
         }
     }
@@ -168,24 +167,22 @@ struct AlarmRingingView: View {
                 isLocked: !canUseRiseAndMove,
                 accent: accent
             ) {
-                #if DEBUG
-                if router.forcePaywallForTesting {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    showingPaywall = true
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+                // ✅ In test mode: always go to the movement task (never paywall).
+                if isTestMode {
+                    showingMovementTask = true
                     return
                 }
-                #endif
-
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
 
                 if canUseRiseAndMove {
                     showingMovementTask = true
                 } else {
-                    showingPaywall = true
+                    // ✅ Single source of truth: present paywall via global ContentView sheet
+                    router.presentPaywall(source: .gate)
                 }
             }
 
-            // ✅ Stop is press-and-hold (prevents fat-finger “Stop”)
             HoldToStopCard(
                 title: "Stop",
                 subtitle: "Press and hold to stop.",
@@ -197,15 +194,6 @@ struct AlarmRingingView: View {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 stopAndClose()
             }
-
-            #if DEBUG
-            if router.forcePaywallForTesting {
-                Text("DEBUG: Paywall forced ON")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.70))
-                    .padding(.top, 2)
-            }
-            #endif
         }
         .padding(.top, 6)
         .padding(.bottom, 4)
@@ -216,13 +204,15 @@ struct AlarmRingingView: View {
     private var riseAndMoveTitle: String { "Rise & Move Stop" }
 
     private var riseAndMoveBadgeText: String? {
-        if router.isPro { return nil }
+        if isTestMode { return "Test" }
+        if router.effectiveIsPro { return nil }
         if !router.hasUsedFreeRiseAndMove { return "Try once free" }
         return "Pro required"
     }
 
     private var riseAndMoveSubtitle: String {
-        if router.isPro { return "Stops only after a short wake-up action." }
+        if isTestMode { return "Practice the wake-up stop — no subscription needed." }
+        if router.effectiveIsPro { return "Stops only after a short wake-up action." }
         if !router.hasUsedFreeRiseAndMove { return "Stops after a short wake-up action — try it once." }
         return "Unlock Pro to use wake-up stop anytime."
     }
@@ -232,13 +222,18 @@ struct AlarmRingingView: View {
     private func stopAndClose() {
         stopSoundAndDeactivateSession()
 
-        // Cancel backup alert so it doesn't fire after the user stops the alarm
         Task {
             await NotificationManager.shared.clearBackupRequest(for: alarm.id)
         }
 
         onStop()
-        router.clearActiveAlarm()
+
+        // ✅ Clear the correct routing state depending on mode.
+        if isTestMode {
+            router.clearTestAlarm()
+        } else {
+            router.clearActiveAlarm()
+        }
     }
 
     // MARK: - Low volume detection
@@ -259,7 +254,6 @@ struct AlarmRingingView: View {
         volumeObserver = nil
     }
 
-    /// outputVolume can be stale right after setActive(true); do a few delayed reads.
     private func syncLowVolumeAfterActivation() {
         Task { @MainActor in
             updateLowVolumeWarning()
@@ -290,11 +284,11 @@ struct AlarmRingingView: View {
             try session.setActive(true)
 
             startSound()
-
-            // ✅ Ensure volume state reflects reality after session activation
             syncLowVolumeAfterActivation()
         } catch {
-            print("Audio session setup failed:", error)
+            DebugOnly.run {
+                print("Audio session setup failed:", error)
+            }
             startSound()
             syncLowVolumeAfterActivation()
         }
@@ -305,7 +299,9 @@ struct AlarmRingingView: View {
                 ?? Bundle.main.url(forResource: "alarm", withExtension: "m4a")
                 ?? Bundle.main.url(forResource: "alarm", withExtension: "wav")
         else {
-            print("Alarm sound file not found in bundle.")
+            DebugOnly.run {
+                print("Alarm sound file not found in bundle.")
+            }
             return
         }
 
@@ -317,7 +313,9 @@ struct AlarmRingingView: View {
             p.play()
             player = p
         } catch {
-            print("Failed to start alarm sound:", error)
+            DebugOnly.run {
+                print("Failed to start alarm sound:", error)
+            }
         }
     }
 
@@ -328,7 +326,9 @@ struct AlarmRingingView: View {
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         } catch {
-            print("Failed to deactivate audio session:", error)
+            DebugOnly.run {
+                print("Failed to deactivate audio session:", error)
+            }
         }
     }
 
@@ -384,7 +384,9 @@ struct AlarmRingingView: View {
                 do {
                     try AVAudioSession.sharedInstance().setActive(true)
                 } catch {
-                    print("Failed to reactivate session after interruption:", error)
+                    DebugOnly.run {
+                        print("Failed to reactivate session after interruption:", error)
+                    }
                 }
                 player?.play()
             }

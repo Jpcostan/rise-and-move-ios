@@ -8,9 +8,45 @@
 import Foundation
 import AVFoundation
 import Combine
+import OSLog
 
 @MainActor
 final class VolumeMonitor: ObservableObject {
+
+    // MARK: - Logging
+
+    /// Debug-only logger (compiled out in Release/TestFlight/App Store).
+    nonisolated private static func dlog(_ message: String,
+                                        file: String = #fileID,
+                                        function: String = #function,
+                                        line: Int = #line) {
+        #if DEBUG
+        let logger = Logger(
+            subsystem: Bundle.main.bundleIdentifier ?? "RiseAndMove",
+            category: "Audio"
+        )
+        logger.debug("\(message, privacy: .public) [\(file, privacy: .public):\(line, privacy: .public)] \(function, privacy: .public)")
+        #endif
+    }
+
+    /// Debug-only error logger (compiled out in Release/TestFlight/App Store).
+    nonisolated private static func dlog(error: Error,
+                                        prefix: String? = nil,
+                                        file: String = #fileID,
+                                        function: String = #function,
+                                        line: Int = #line) {
+        #if DEBUG
+        let logger = Logger(
+            subsystem: Bundle.main.bundleIdentifier ?? "RiseAndMove",
+            category: "Audio"
+        )
+        if let prefix {
+            logger.error("\(prefix, privacy: .public) \(String(describing: error), privacy: .public) [\(file, privacy: .public):\(line, privacy: .public)] \(function, privacy: .public)")
+        } else {
+            logger.error("\(String(describing: error), privacy: .public) [\(file, privacy: .public):\(line, privacy: .public)] \(function, privacy: .public)")
+        }
+        #endif
+    }
 
     /// 0.0 ... 1.0 (device media volume)
     @Published private(set) var outputVolume: Float = AVAudioSession.sharedInstance().outputVolume
@@ -39,8 +75,7 @@ final class VolumeMonitor: ObservableObject {
         do {
             try session.setActive(true, options: [])
         } catch {
-            // Non-fatal; polling still reads a value, just may be less reactive.
-            print("VolumeMonitor failed to activate session:", error)
+            Self.dlog(error: error, prefix: "Failed to activate AVAudioSession:")
         }
 
         // Refresh immediately
@@ -63,7 +98,6 @@ final class VolumeMonitor: ObservableObject {
                 self.refreshVolume(session: session)
             }
     }
-
 
     func stop() {
         volumeObserver?.invalidate()
@@ -92,5 +126,6 @@ final class VolumeMonitor: ObservableObject {
     deinit {
         volumeObserver?.invalidate()
         pollCancellable?.cancel()
+        Self.dlog("VolumeMonitor deinit.")
     }
 }

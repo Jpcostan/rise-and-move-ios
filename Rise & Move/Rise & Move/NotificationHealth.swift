@@ -112,21 +112,26 @@ final class NotificationHealth: ObservableObject {
     func ensurePermissionOrSettings() async -> Bool {
         // Returns true only if alarm-capable after potential permission request.
         await refresh()
-        if capability == .notDetermined {
-            let granted = await requestPermission()
-            if granted {
-                await refresh()
-            } else {
-                await refresh()
-            }
+
+        // If we can’t request (already denied/disabled), just return capability.
+        guard capability == .notDetermined else {
+            return capability.isAlarmCapable
         }
-        return capability.isAlarmCapable
+
+        // Ask once if not determined, then re-check settings.
+        let granted = await requestPermission()
+        await refresh()
+
+        return granted && capability.isAlarmCapable
     }
 
     func requestPermission() async -> Bool {
         do {
             return try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
         } catch {
+            DebugOnly.run {
+                print("Notification permission request failed:", error)
+            }
             return false
         }
     }

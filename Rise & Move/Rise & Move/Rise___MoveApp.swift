@@ -34,10 +34,10 @@ struct Rise_MoveApp: App {
             }
         }
 
-        // ✅ Test notifications: route to test alarm screen
-        delegate.onTestTap = {
+        // ✅ Test notifications: route using payload when available
+        delegate.onTestTap = { testID, label in
             Task { @MainActor in
-                router.openTestAlarm()
+                router.openTestAlarm(id: testID, label: label)
             }
         }
 
@@ -111,7 +111,9 @@ private struct RootView: View {
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     var onAlarmTap: ((UUID) -> Void)?
     var onStopAction: ((UUID) -> Void)?
-    var onTestTap: (() -> Void)?
+
+    /// ✅ Test notification tap (passes payload when available)
+    var onTestTap: ((UUID, String?) -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
@@ -123,10 +125,16 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let isTest = (userInfo["isTest"] as? Bool) == true
 
         if kind == "test" || isTest {
-            let _ = userInfo["alarmID"] as? String
-            let _ = userInfo["label"] as? String
-
-            onTestTap?()
+            if
+                let idString = userInfo["alarmID"] as? String,
+                let id = UUID(uuidString: idString)
+            {
+                let label = userInfo["label"] as? String
+                onTestTap?(id, label)
+            } else {
+                // Fallback (should be rare)
+                onTestTap?(UUID(), userInfo["label"] as? String)
+            }
             return
         }
 

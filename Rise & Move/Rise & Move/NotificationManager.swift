@@ -1,9 +1,42 @@
 import Foundation
 import UserNotifications
+import OSLog
 
 final class NotificationManager {
     static let shared = NotificationManager()
     private init() {}
+
+    // MARK: - Logging
+
+    private static let log = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "RiseAndMove",
+        category: "Notifications"
+    )
+
+    /// Debug-only logger (compiled out in Release/TestFlight/App Store).
+    private static func dlog(_ message: String,
+                             file: String = #fileID,
+                             function: String = #function,
+                             line: Int = #line) {
+        #if DEBUG
+        log.debug("\(message, privacy: .public) [\(file, privacy: .public):\(line, privacy: .public)] \(function, privacy: .public)")
+        #endif
+    }
+
+    /// Debug-only error logger (compiled out in Release/TestFlight/App Store).
+    private static func dlog(error: Error,
+                             prefix: String? = nil,
+                             file: String = #fileID,
+                             function: String = #function,
+                             line: Int = #line) {
+        #if DEBUG
+        if let prefix {
+            log.error("\(prefix, privacy: .public) \(String(describing: error), privacy: .public) [\(file, privacy: .public):\(line, privacy: .public)] \(function, privacy: .public)")
+        } else {
+            log.error("\(String(describing: error), privacy: .public) [\(file, privacy: .public):\(line, privacy: .public)] \(function, privacy: .public)")
+        }
+        #endif
+    }
 
     // MARK: - Identifiers
 
@@ -39,7 +72,7 @@ final class NotificationManager {
             return try await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound])
         } catch {
-            print("Notification auth error:", error)
+            Self.dlog(error: error, prefix: "Notification auth error:")
             return false
         }
     }
@@ -56,8 +89,10 @@ final class NotificationManager {
 
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: ids)
+
+        Self.dlog("Cleared pending requests: \(ids.joined(separator: ", "))")
     }
-    
+
     /// Clears only the backup notification for this alarm.
     /// Also clears the legacy identifier as a safety net (older builds).
     func clearBackupRequest(for alarmID: UUID) async {
@@ -68,12 +103,15 @@ final class NotificationManager {
 
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: ids)
+
+        Self.dlog("Cleared backup requests: \(ids.joined(separator: ", "))")
     }
 
     func scheduleNotification(for alarm: Alarm) async {
         // If disabled, ensure ALL pending requests are cleared.
         guard alarm.isEnabled else {
             await clearPendingRequests(for: alarm.id)
+            Self.dlog("Alarm disabled; cleared pending: \(alarm.id.uuidString)")
             return
         }
 
@@ -126,8 +164,9 @@ final class NotificationManager {
 
         do {
             try await UNUserNotificationCenter.current().add(primaryRequest)
+            Self.dlog("Scheduled PRIMARY for: \(alarm.id.uuidString) at \(next)")
         } catch {
-            print("Failed to schedule PRIMARY notification:", error)
+            Self.dlog(error: error, prefix: "Failed to schedule PRIMARY:")
         }
 
         // ---------------------------
@@ -169,12 +208,13 @@ final class NotificationManager {
 
         do {
             try await UNUserNotificationCenter.current().add(backupRequest)
+            Self.dlog("Scheduled BACKUP for: \(alarm.id.uuidString) at \(backupFireDate) (\(clampedMinutes)m)")
         } catch {
-            print("Failed to schedule BACKUP notification:", error)
+            Self.dlog(error: error, prefix: "Failed to schedule BACKUP:")
         }
     }
-    
-    // MARK: - Test Alarm
+
+    // MARK: - Test Alarm (production feature)
 
     func scheduleTestNotification(secondsFromNow seconds: Int = 15) async {
         let clamped = min(max(seconds, 5), 60)
@@ -185,7 +225,8 @@ final class NotificationManager {
 
         let content = UNMutableNotificationContent()
         content.title = "Rise & Move"
-        content.body = "Test alarm — if you see/hear this, notifications are working."
+        // ✅ Clear instruction: tap to open the alarm screen
+        content.body = "Test alarm — tap to open and try stopping it."
         content.sound = .default
 
         if #available(iOS 15.0, *) {
@@ -218,12 +259,11 @@ final class NotificationManager {
 
         do {
             try await UNUserNotificationCenter.current().add(request)
+            Self.dlog("Scheduled TEST notification: \(id) in \(clamped)s")
         } catch {
-            print("Failed to schedule TEST notification:", error)
+            Self.dlog(error: error, prefix: "Failed to schedule TEST:")
         }
     }
-
-
 
     // MARK: - Internal helpers
 

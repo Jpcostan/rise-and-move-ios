@@ -38,11 +38,24 @@ struct SettingsView: View {
                     HStack {
                         Text("Status")
                         Spacer()
-                        Text(router.isPro ? "Pro" : "Free")
+                        // ✅ Use effectiveIsPro so the UI matches debug forcing behavior.
+                        Text(router.effectiveIsPro ? "Pro" : "Free")
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(router.isPro ? .green : .secondary)
+                            .foregroundStyle(router.effectiveIsPro ? .green : .secondary)
                     }
 
+                    // ✅ Explicit purchase entry point (only show when not Pro)
+                    if !router.effectiveIsPro {
+                        Button {
+                            // ✅ Pop back so the paywall appears in the main context too
+                            dismiss()
+                            router.presentPaywall(source: .settings)
+                        } label: {
+                            Text("Upgrade to Pro")
+                        }
+                    }
+
+                    // Keep this available either way; if Pro, it’s the primary action.
                     Button {
                         Task { await openManageSubscriptions() }
                     } label: {
@@ -67,17 +80,66 @@ struct SettingsView: View {
                     }
                 }
 
+                // ✅ DEBUG-only tools (compile-time gated)
+                #if DEBUG
+                Section("Developer") {
+                    Toggle("Force Paywall (Debug)", isOn: $router.forcePaywallForTesting)
+
+                    Button("Reset Free Rise & Move (Debug)") {
+                        router.resetFreeRiseAndMoveTrialForTesting()
+                    }
+
+                    Text("These options are DEBUG-only and will not ship in the App Store/TestFlight build.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                #endif
+
+                // ✅ Onboarding replay
+                Section("Onboarding") {
+                    Button {
+                        // Ask ContentView to present onboarding on top of everything.
+                        router.showOnboarding()
+                        dismiss()
+                    } label: {
+                        Text("View Onboarding Again")
+                    }
+
+                    Text("Replays the quick setup walkthrough and test alarm tips.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 // ✅ Test Alarm section
                 Section("Test Alarm") {
+
+                    // ✅ Instant test (no notifications needed)
+                    Button {
+                        router.openTestAlarm()
+                    } label: {
+                        Text("Run Test Alarm Now")
+                    }
+
+                    Text("Opens the alarm screen immediately so you can confirm the hold interaction.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Divider()
+
+                    // ✅ Scheduled notification test (delivery + tap behavior)
                     Stepper(value: $testScheduledSeconds, in: 5...60, step: 5) {
-                        Text("In \(testScheduledSeconds) seconds")
+                        Text("Notification test in \(testScheduledSeconds) seconds")
                     }
 
                     Button {
                         Task { await sendTestAlarm() }
                     } label: {
-                        Text("Send Test Alarm")
+                        Text("Send Test Notification")
                     }
+
+                    Text("When it appears, tap the notification to open the alarm screen.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
                     if let testErrorMessage {
                         Text(testErrorMessage)
@@ -88,7 +150,7 @@ struct SettingsView: View {
                 .alert("Test Scheduled", isPresented: $showingTestScheduledAlert) {
                     Button("OK", role: .cancel) { }
                 } message: {
-                    Text("A test alarm will fire in \(testScheduledSeconds) seconds.")
+                    Text("A test notification will appear in \(testScheduledSeconds) seconds. Tap it to open the alarm screen.")
                 }
 
                 // ✅ Audio guardrail (volume)
@@ -142,6 +204,17 @@ struct SettingsView: View {
                 }
             }
 
+            // ✅ Allow paywall to present even while Settings is pushed via NavigationStack
+            .sheet(item: $router.paywallContext) { _ in
+                PaywallView(
+                    onPurchased: { },
+                    onClose: { router.dismissPaywall() }
+                )
+            }
+            .onChange(of: router.isPro) { _, isPro in
+                if isPro { router.dismissPaywall() }
+            }
+
             // ✅ Refresh + start volume monitoring whenever Settings becomes visible
             .onAppear {
                 volumeMonitor.start()
@@ -158,7 +231,7 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Test Alarm
+    // MARK: - Test Alarm (scheduled notification)
 
     @MainActor
     private func sendTestAlarm() async {
@@ -170,8 +243,12 @@ struct SettingsView: View {
         // Ensure permission or route user to Settings
         let ok = await notificationHealth.ensurePermissionOrSettings()
         guard ok else {
+            // Use capability-specific messaging (more helpful, less generic)
+            let title = notificationHealth.capability.title
+            let message = notificationHealth.capability.message
+
             notificationHealth.openAppSettings()
-            testErrorMessage = "Enable notifications (and Sounds) in Settings to run a test."
+            testErrorMessage = "\(title). \(message)"
             return
         }
 

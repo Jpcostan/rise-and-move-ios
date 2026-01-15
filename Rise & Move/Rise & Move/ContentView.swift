@@ -9,19 +9,21 @@ private struct EditingAlarmItem: Identifiable {
     let id: UUID
 }
 
-// ✅ NEW: Identifiable wrapper for presenting a test alarm
+// ✅ Identifiable wrapper for presenting a test alarm
+// ✅ IMPORTANT: Use the alarm's UUID as the Identifiable ID so the cover doesn't
+// re-create a brand-new identity every render (prevents "flash/dismiss/reopen").
 private struct TestAlarmItem: Identifiable {
-    let id = UUID()
     let alarm: Alarm
+    var id: UUID { alarm.id }
 }
 
 struct ContentView: View {
     @EnvironmentObject private var store: AlarmStore
-    @State private var showingAddAlarm = false
-    @State private var showingSettings = false
-    @State private var editingAlarmItem: EditingAlarmItem?
-    @State private var didRequestNotifications = false
     @EnvironmentObject private var router: AppRouter
+
+    @State private var showingAddAlarm = false
+    @State private var showSettingsNav = false
+    @State private var editingAlarmItem: EditingAlarmItem?
 
     // ✅ Notification health + foreground refresh
     @Environment(\.scenePhase) private var scenePhase
@@ -35,9 +37,20 @@ struct ContentView: View {
     @State private var showNotificationsGate = false
     @State private var pendingToggleAlarmID: UUID? = nil
 
-    // ✅ NEW: Helps avoid doing volume monitoring / banners while ringing
+    // ✅ Step 4: First-run onboarding gate
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
+
+    // ✅ Helps avoid doing volume monitoring / banners while ringing
     private var isRingingOrTesting: Bool {
         router.activeAlarmID != nil || router.activeTestAlarm != nil
+    }
+
+    // ✅ Source-of-truth for whether onboarding should be shown
+    private var shouldShowOnboarding: Bool {
+        // Never cover an alarm or test alarm.
+        guard !isRingingOrTesting else { return false }
+        // Show if first-run not completed OR Settings requested a replay.
+        return !hasCompletedOnboarding || router.forceShowOnboarding
     }
 
     var body: some View {
@@ -86,6 +99,9 @@ struct ContentView: View {
             }
             .preferredColorScheme(.dark)
             .navigationTitle("Rise & Move")
+            .navigationDestination(isPresented: $showSettingsNav) {
+                SettingsView()
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
@@ -93,8 +109,12 @@ struct ContentView: View {
                 // Settings button (top-left)
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        showingSettings = true
-                    } label: {
+                        Task { @MainActor in
+                            // Let the sheet dismissal finish and hit-testing settle
+                            await Task.yield()
+                            showSettingsNav = true
+                        }
+                    }  label: {
                         Image(systemName: "gearshape")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white)
@@ -144,9 +164,37 @@ struct ContentView: View {
                 """)
             }
 
-            // Settings sheet
-            .sheet(isPresented: $showingSettings) {
-                SettingsView()
+            // ✅ Onboarding full-screen cover (first-run + Settings replay)
+            .fullScreenCover(
+                isPresented: Binding(
+                    get: { shouldShowOnboarding },
+                    set: { newValue in
+                        // When the cover is dismissed (newValue becomes false), clear the Settings replay flag.
+                        if !newValue {
+                            router.clearOnboardingRequest()
+
+                            // ✅ If onboarding dismissed due to "Unlock Pro", present paywall now.
+                            if router.presentPaywallAfterOnboarding {
+                                router.clearDeferredPaywallRequest()
+                                router.presentPaywall(source: .onboarding)
+                            }
+                        }
+                    }
+                )
+            ) {
+                OnboardingFlowView(
+                    onFinish: {
+                        hasCompletedOnboarding = true
+                        router.clearOnboardingRequest()
+                    },
+                    onTryTestAlarm: {
+                        // Teach the hold interaction immediately (no notification delivery needed).
+                        router.clearOnboardingRequest()
+                        router.openTestAlarm()
+                    }
+                )
+                .environmentObject(router) // ✅ ensure onboarding receives router for paywall presentation
+                .interactiveDismissDisabled(true)
             }
 
             .sheet(isPresented: $showingAddAlarm) {
@@ -163,18 +211,34 @@ struct ContentView: View {
                 }
             }
 
-            // ✅ NEW: Test alarm full-screen cover (separate from real alarms)
+            // ✅ Global Paywall sheet (single source of truth)
+            .sheet(item: $router.paywallContext) { _ in
+                PaywallView(
+                    onPurchased: {
+                        // ✅ No-op is fine: entitlements refresh drives router.isPro elsewhere.
+                    },
+                    onClose: {
+                        router.dismissPaywall()
+                    }
+                )
+            }
+            .onChange(of: router.isPro) { _, isPro in
+                // ✅ If purchase succeeds and entitlements update, auto-dismiss paywall
+                if isPro {
+                    router.dismissPaywall()
+                }
+            }
+
+            // ✅ Test alarm full-screen cover (separate from real alarms)
             .fullScreenCover(
                 item: Binding<TestAlarmItem?>(
-                    get: {
-                        router.activeTestAlarm.map { TestAlarmItem(alarm: $0) }
-                    },
+                    get: { router.activeTestAlarm.map { TestAlarmItem(alarm: $0) } },
                     set: { item in
                         if item == nil { router.clearTestAlarm() }
                     }
                 )
             ) { item in
-                AlarmRingingView(alarm: item.alarm) {
+                AlarmRingingView(alarm: item.alarm, isTestMode: true) {
                     // Test alarm stop: just dismiss
                     router.clearTestAlarm()
                 }
@@ -226,13 +290,6 @@ struct ContentView: View {
                 Text(notificationHealth.capability.message)
             }
 
-            // ✅ Existing: initial permission request
-            .task {
-                guard !didRequestNotifications else { return }
-                didRequestNotifications = true
-                _ = await NotificationManager.shared.requestAuthorization()
-            }
-
             // ✅ Keep notification status current
             .task {
                 await notificationHealth.refresh()
@@ -248,10 +305,7 @@ struct ContentView: View {
                 volumeMonitor.stop()
             }
 
-            // ✅ CHANGED: Scene phase handling
-            // - Start on .active (unless ringing)
-            // - Stop only on .background
-            // - Do nothing on .inactive (notification taps often pass through inactive)
+            // ✅ Scene phase handling
             .onChange(of: scenePhase) { _, newValue in
                 switch newValue {
                 case .active:
@@ -272,11 +326,15 @@ struct ContentView: View {
                 }
             }
 
-            // ✅ If a notification tries to open an alarm while a sheet is up,
+            // ✅ If a notification tries to open an alarm while a sheet/onboarding is up,
             // dismiss sheets so the fullScreenCover can present.
             .onChange(of: router.activeTestAlarm) { _, newValue in
                 guard newValue != nil else { return }
-                showingSettings = false
+
+                // ✅ NEW: make sure nothing else is presenting
+                showSettingsNav = false
+                router.dismissPaywall()
+
                 showingAddAlarm = false
                 editingAlarmItem = nil
 
@@ -286,7 +344,11 @@ struct ContentView: View {
 
             .onChange(of: router.activeAlarmID) { _, newValue in
                 guard newValue != nil else { return }
-                showingSettings = false
+
+                // ✅ NEW: make sure nothing else is presenting
+                showSettingsNav = false
+                router.dismissPaywall()
+
                 showingAddAlarm = false
                 editingAlarmItem = nil
 
@@ -522,6 +584,10 @@ private struct AlarmCardRow: View {
     }
 }
 
+#if DEBUG
 #Preview {
+    // NOTE: Provide environment objects in previews if you want it to render.
+    // If you prefer, you can remove the preview entirely.
     ContentView()
 }
+#endif

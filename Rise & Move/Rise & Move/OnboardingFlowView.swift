@@ -1,12 +1,23 @@
 import SwiftUI
 import UserNotifications
+import UIKit
 
 struct OnboardingFlowView: View {
     let onFinish: () -> Void
     let onTryTestAlarm: () -> Void
 
     @State private var step: Int = 0
+
+    // ✅ Use NotificationHealth so onboarding matches Settings behavior
+    @StateObject private var notificationHealth = NotificationHealth()
+
+    // ✅ Router access for presenting Paywall + reading Pro status
+    @EnvironmentObject private var router: AppRouter
+
+    // Keep this for the UI label + status row
     @State private var notificationsStatusText: String = "Not set"
+
+    // Keep (used to choose initial button label)
     @State private var didRequestNotifications: Bool = false
 
     var body: some View {
@@ -29,7 +40,8 @@ struct OnboardingFlowView: View {
                     pageWelcome.tag(0)
                     pageNotifications.tag(1)
                     pageTestAlarm.tag(2)
-                    pageNotificationTap.tag(3) // ✅ NEW
+                    pageNotificationTap.tag(3)
+                    pagePro.tag(4)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .always))
                 .padding(.horizontal, 18)
@@ -42,7 +54,12 @@ struct OnboardingFlowView: View {
             }
         }
         .onAppear {
-            refreshNotificationStatus()
+            Task { await refreshNotificationStatus() }
+        }
+        // ✅ CHANGED: when the app becomes active again (e.g., returning from Settings),
+        // refresh notification status so the UI updates immediately.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            Task { await refreshNotificationStatus() }
         }
         .accessibilityElement(children: .contain)
     }
@@ -76,9 +93,9 @@ struct OnboardingFlowView: View {
             )
 
             Button {
-                Task { await requestNotifications() }
+                Task { await handleNotificationsCTA() }
             } label: {
-                Text(didRequestNotifications ? "Check Again" : "Enable Notifications")
+                Text(notificationsButtonTitle)
                     .font(.system(.callout, design: .rounded))
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity)
@@ -87,7 +104,8 @@ struct OnboardingFlowView: View {
             .buttonStyle(.borderedProminent)
             .tint(.white.opacity(0.18))
             .foregroundStyle(.white)
-            .accessibilityHint("Requests notification permission.")
+            .disabled(notificationHealth.capability == .ok)
+            .accessibilityHint(notificationsButtonHint)
         }
         .padding(.top, 6)
     }
@@ -124,7 +142,6 @@ struct OnboardingFlowView: View {
         .padding(.top, 6)
     }
 
-    // ✅ NEW: Explain that user must tap notification to open the alarm screen
     private var pageNotificationTap: some View {
         VStack(spacing: 16) {
             OnboardingCard(
@@ -138,6 +155,52 @@ struct OnboardingFlowView: View {
             )
 
             Text("iOS requires user interaction for alarm experiences.")
+                .font(.system(.footnote, design: .rounded))
+                .foregroundStyle(.white.opacity(0.65))
+                .multilineTextAlignment(.center)
+                .padding(.top, 2)
+        }
+        .padding(.top, 6)
+    }
+
+    private var pagePro: some View {
+        VStack(spacing: 16) {
+            OnboardingCard(
+                icon: "sparkles",
+                title: "Unlock Pro",
+                subtitle: "Keep using Rise & Move anytime.",
+                bodyText: """
+                Your first Rise & Move stop is free.
+                Pro unlocks unlimited use and supports ongoing development.
+                """
+            )
+
+            if router.effectiveIsPro {
+                Text("You’re already Pro ✅")
+                    .font(.system(.callout, design: .rounded))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.top, 2)
+            } else {
+                Button {
+                    // ✅ Defer paywall until onboarding dismisses (prevents "single sheet" issue)
+                    router.requestPaywallAfterOnboarding()
+                    // ✅ CHANGED: centralize finishing logic (consistent for first-run + replay)
+                    finishOnboarding()
+                } label: {
+                    Text("Unlock Pro")
+                        .font(.system(.callout, design: .rounded))
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.white.opacity(0.18))
+                .foregroundStyle(.white)
+                .accessibilityHint("Opens the Pro upgrade screen.")
+            }
+
+            Text("You can upgrade anytime in Settings.")
                 .font(.system(.footnote, design: .rounded))
                 .foregroundStyle(.white.opacity(0.65))
                 .multilineTextAlignment(.center)
@@ -168,15 +231,15 @@ struct OnboardingFlowView: View {
                 .disabled(step == 0)
 
                 Button {
-                    if step < 3 {
+                    if step < 4 {
                         withAnimation(.easeOut(duration: 0.18)) {
                             step += 1
                         }
                     } else {
-                        onFinish()
+                        finishOnboarding() // ✅ CHANGED
                     }
                 } label: {
-                    Text(step < 3 ? "Continue" : "Get Started")
+                    Text(step < 4 ? "Continue" : "Get Started")
                         .font(.system(.callout, design: .rounded))
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
@@ -185,7 +248,7 @@ struct OnboardingFlowView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.white.opacity(0.18))
                 .foregroundStyle(.white)
-                .accessibilityHint(step < 3 ? "Go to the next step." : "Finish onboarding and enter the app.")
+                .accessibilityHint(step < 4 ? "Go to the next step." : "Finish onboarding and enter the app.")
             }
 
             Text(step == 1 || step == 3 ? "You can change this anytime in Settings." : " ")
@@ -205,39 +268,81 @@ struct OnboardingFlowView: View {
         )
     }
 
-    // MARK: - Notifications
+    // ✅ CHANGED: centralized finish
+    private func finishOnboarding() {
+        onFinish()
+    }
 
-    private func refreshNotificationStatus() {
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            let text: String
-            switch settings.authorizationStatus {
-            case .notDetermined:
-                text = "Not requested"
-            case .denied:
-                text = "Denied"
-            case .authorized, .provisional, .ephemeral:
-                text = "Enabled"
-            @unknown default:
-                text = "Unknown"
-            }
+    // MARK: - Notifications (capability-driven)
 
-            DispatchQueue.main.async {
-                notificationsStatusText = text
-            }
+    private var notificationsButtonTitle: String {
+        switch notificationHealth.capability {
+        case .ok:
+            return "Enabled"
+        case .notDetermined:
+            return didRequestNotifications ? "Check Again" : notificationHealth.capability.ctaTitle
+        case .denied, .alertsDisabled, .soundsDisabled, .unknown:
+            return notificationHealth.capability.ctaTitle
+        }
+    }
+
+    private var notificationsButtonHint: String {
+        switch notificationHealth.capability {
+        case .ok:
+            return "Notifications are enabled."
+        case .notDetermined:
+            return "Requests notification permission."
+        case .denied, .alertsDisabled, .soundsDisabled, .unknown:
+            return "Opens Settings so you can enable notifications and sounds."
         }
     }
 
     @MainActor
-    private func requestNotifications() async {
+    private func refreshNotificationStatus() async {
+        await notificationHealth.refresh()
+        notificationsStatusText = statusText(for: notificationHealth.capability)
+    }
+
+    private func statusText(for capability: NotificationHealth.AlarmCapability) -> String {
+        switch capability {
+        case .ok:
+            return "Enabled"
+        case .notDetermined:
+            return "Not requested"
+        case .denied:
+            return "Denied"
+        case .alertsDisabled:
+            return "Alerts Off"
+        case .soundsDisabled:
+            return "Sounds Off"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    @MainActor
+    private func handleNotificationsCTA() async {
         didRequestNotifications = true
-        do {
-            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
-            notificationsStatusText = granted ? "Enabled" : "Denied"
-        } catch {
-            notificationsStatusText = "Error"
+
+        // If not determined, request permission once.
+        if notificationHealth.capability == .notDetermined {
+            _ = await notificationHealth.requestPermission()
+            await refreshNotificationStatus()
+            return
         }
 
-        refreshNotificationStatus()
+        // If denied/disabled/unknown, route to Settings (standard iOS behavior).
+        if !notificationHealth.capability.isAlarmCapable {
+            notificationHealth.openAppSettings()
+            // Refresh after a short delay so UI updates when user comes back.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                Task { await refreshNotificationStatus() }
+            }
+            return
+        }
+
+        // Otherwise it’s ok—nothing to do.
+        await refreshNotificationStatus()
     }
 
     // MARK: - Small UI helpers

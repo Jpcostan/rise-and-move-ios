@@ -74,9 +74,6 @@
             ReferencedContainer = "container:Rise &amp; Move.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <StoreKitConfigurationFileReference
-         identifier = "../../Rise &amp; Move/RiseAndMove.storekit">
-      </StoreKitConfigurationFileReference>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

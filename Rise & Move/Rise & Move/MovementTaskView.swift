@@ -37,6 +37,9 @@ struct MovementTaskView: View {
     @State private var isInterrupted = false
     @State private var lastInterruptionBeganAt: Date? = nil
 
+    // ✅ NEW (Step 2): track last time we announced an interruption to avoid repeats
+    @State private var lastInterruptionAnnouncementAt: Date? = nil
+
     // Haptics generators (reused + prepared)
     private let holdStartHaptic = UIImpactFeedbackGenerator(style: .soft)
     private let progressTickHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -115,9 +118,9 @@ struct MovementTaskView: View {
             switch newPhase {
             case .active:
                 // Coming back — don’t auto-resume. Keep user in control.
+                // Only announce if we actually flagged an interruption.
                 if isInterrupted {
-                    // Small VO hint if they rely on it; don’t spam.
-                    announce("Resume holding to stop the alarm.")
+                    announceOncePerInterval("Resume holding to stop the alarm.", minInterval: 1.5)
                     isInterrupted = false
                 }
             case .inactive, .background:
@@ -192,6 +195,7 @@ struct MovementTaskView: View {
         // Interruption state
         isInterrupted = false
         lastInterruptionBeganAt = nil
+        lastInterruptionAnnouncementAt = nil
     }
 
     private var supportsHaptics: Bool {
@@ -230,6 +234,17 @@ struct MovementTaskView: View {
 
     private func announce(_ message: String) {
         guard voiceOverRunning else { return }
+        UIAccessibility.post(notification: .announcement, argument: message)
+    }
+
+    // ✅ NEW (Step 2): small throttle so interruption/resume announcements don’t spam
+    private func announceOncePerInterval(_ message: String, minInterval: TimeInterval) {
+        guard voiceOverRunning else { return }
+        let now = Date()
+        if let last = lastInterruptionAnnouncementAt, now.timeIntervalSince(last) < minInterval {
+            return
+        }
+        lastInterruptionAnnouncementAt = now
         UIAccessibility.post(notification: .announcement, argument: message)
     }
 
@@ -329,7 +344,8 @@ struct MovementTaskView: View {
             }
             stopBreathing()
 
-            announce("Interrupted. Resume holding to stop the alarm.")
+            // ✅ Step 2: calm, non-spam VO messaging
+            announceOncePerInterval("Interrupted. Resume holding to stop the alarm.", minInterval: 1.5)
 
         case .ended:
             // Don’t auto-resume. Keep user in control.

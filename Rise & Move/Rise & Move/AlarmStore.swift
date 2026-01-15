@@ -68,7 +68,9 @@ final class AlarmStore: ObservableObject {
             let data = try JSONEncoder().encode(alarms)
             UserDefaults.standard.set(data, forKey: storageKey)
         } catch {
-            print("Failed to save alarms:", error)
+            DebugOnly.run {
+                print("Failed to save alarms:", error)
+            }
         }
     }
 
@@ -81,7 +83,9 @@ final class AlarmStore: ObservableObject {
         do {
             alarms = try JSONDecoder().decode([Alarm].self, from: data)
         } catch {
-            print("Failed to load alarms:", error)
+            DebugOnly.run {
+                print("Failed to load alarms:", error)
+            }
             alarms = []
         }
 
