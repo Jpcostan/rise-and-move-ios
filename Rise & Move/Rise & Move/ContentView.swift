@@ -40,6 +40,16 @@ struct ContentView: View {
     // ✅ Step 4: First-run onboarding gate
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
 
+    // ✅ Resume-onboarding support (safe: no stacked presentations)
+    @State private var suppressOnboardingForModal: Bool = false
+    @State private var resumeOnboardingStep: Int = 0
+    @State private var resumeAfterTestAlarm: Bool = false
+    @State private var resumeAfterPaywall: Bool = false
+
+    // ✅ NEW: Distinguish "resume after modal launched from onboarding"
+    // from "replay onboarding from Settings".
+    @State private var resumeOnboardingFromModal: Bool = false
+
     // ✅ Helps avoid doing volume monitoring / banners while ringing
     private var isRingingOrTesting: Bool {
         router.activeAlarmID != nil || router.activeTestAlarm != nil
@@ -49,8 +59,16 @@ struct ContentView: View {
     private var shouldShowOnboarding: Bool {
         // Never cover an alarm or test alarm.
         guard !isRingingOrTesting else { return false }
+        // When we intentionally dismiss onboarding to present another UI, suppress it.
+        guard !suppressOnboardingForModal else { return false }
         // Show if first-run not completed OR Settings requested a replay.
         return !hasCompletedOnboarding || router.forceShowOnboarding
+    }
+
+    // ✅ Gate global modal presentations while onboarding is visible.
+    // This prevents queued/delayed presentations from firing only after onboarding dismisses.
+    private var canPresentGlobalModals: Bool {
+        !shouldShowOnboarding
     }
 
     var body: some View {
@@ -114,7 +132,7 @@ struct ContentView: View {
                             await Task.yield()
                             showSettingsNav = true
                         }
-                    }  label: {
+                    } label: {
                         Image(systemName: "gearshape")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white)
@@ -164,37 +182,74 @@ struct ContentView: View {
                 """)
             }
 
-            // ✅ Onboarding full-screen cover (first-run + Settings replay)
+            // ✅ Onboarding as a true full-screen presentation
             .fullScreenCover(
                 isPresented: Binding(
                     get: { shouldShowOnboarding },
                     set: { newValue in
-                        // When the cover is dismissed (newValue becomes false), clear the Settings replay flag.
                         if !newValue {
                             router.clearOnboardingRequest()
-
-                            // ✅ If onboarding dismissed due to "Unlock Pro", present paywall now.
-                            if router.presentPaywallAfterOnboarding {
-                                router.clearDeferredPaywallRequest()
-                                router.presentPaywall(source: .onboarding)
-                            }
                         }
                     }
                 )
             ) {
                 OnboardingFlowView(
+                    initialStep: resumeOnboardingStep,
                     onFinish: {
                         hasCompletedOnboarding = true
                         router.clearOnboardingRequest()
+
+                        resumeAfterTestAlarm = false
+                        resumeAfterPaywall = false
+                        resumeOnboardingFromModal = false
+                        suppressOnboardingForModal = false
                     },
-                    onTryTestAlarm: {
-                        // Teach the hold interaction immediately (no notification delivery needed).
+                    onTryTestAlarm: { step in
+                        // Save progress and dismiss onboarding cleanly before presenting the test alarm.
+                        resumeOnboardingStep = step
+                        resumeAfterTestAlarm = true
+                        resumeOnboardingFromModal = true
+
+                        // Dismiss anything else that could block presentation.
+                        showSettingsNav = false
+                        showingAddAlarm = false
+                        editingAlarmItem = nil
+                        router.dismissPaywall()
+
+                        suppressOnboardingForModal = true
                         router.clearOnboardingRequest()
-                        router.openTestAlarm()
+
+                        Task { @MainActor in
+                            await Task.yield()
+                            router.openTestAlarm()
+                        }
+                    },
+                    onUnlockPro: { step in
+                        // Save progress and dismiss onboarding cleanly before presenting paywall.
+                        resumeOnboardingStep = step
+                        resumeAfterPaywall = true
+                        resumeOnboardingFromModal = true
+
+                        // Dismiss anything else that could block presentation.
+                        showSettingsNav = false
+                        showingAddAlarm = false
+                        editingAlarmItem = nil
+
+                        suppressOnboardingForModal = true
+                        router.clearOnboardingRequest()
+
+                        Task { @MainActor in
+                            await Task.yield()
+                            router.presentPaywall(source: .onboarding)
+                        }
                     }
                 )
-                .environmentObject(router) // ✅ ensure onboarding receives router for paywall presentation
+                .environmentObject(router)
                 .interactiveDismissDisabled(true)
+                // ✅ Once onboarding is visible again, we're no longer in "resume mode".
+                .onAppear {
+                    resumeOnboardingFromModal = false
+                }
             }
 
             .sheet(isPresented: $showingAddAlarm) {
@@ -212,37 +267,85 @@ struct ContentView: View {
             }
 
             // ✅ Global Paywall sheet (single source of truth)
-            .sheet(item: $router.paywallContext) { _ in
+            .sheet(
+                item: Binding(
+                    get: { canPresentGlobalModals ? router.paywallContext : nil },
+                    set: { newValue in
+                        if newValue == nil {
+                            router.dismissPaywall()
+                        }
+                    }
+                )
+            ) { _ in
                 PaywallView(
-                    onPurchased: {
-                        // ✅ No-op is fine: entitlements refresh drives router.isPro elsewhere.
-                    },
+                    onPurchased: { },
                     onClose: {
                         router.dismissPaywall()
                     }
                 )
             }
             .onChange(of: router.isPro) { _, isPro in
-                // ✅ If purchase succeeds and entitlements update, auto-dismiss paywall
                 if isPro {
                     router.dismissPaywall()
                 }
             }
+            .onChange(of: router.paywallContext) { _, newValue in
+                // ✅ If we dismissed paywall that was launched from onboarding, resume onboarding at saved step.
+                if newValue == nil, resumeAfterPaywall {
+                    resumeAfterPaywall = false
+                    suppressOnboardingForModal = false
+                    Task { @MainActor in
+                        router.forceShowOnboarding = true
+                    }
+                }
+            }
 
-            // ✅ Test alarm full-screen cover (separate from real alarms)
+            // ✅ Reset onboarding to step 0 ONLY when replaying from Settings (not resuming from a modal)
+            .onChange(of: router.forceShowOnboarding) { _, newValue in
+                guard newValue == true else { return }
+                if !resumeOnboardingFromModal {
+                    resumeOnboardingStep = 0
+                }
+            }
+
+            // ✅ Test alarm full-screen cover
             .fullScreenCover(
                 item: Binding<TestAlarmItem?>(
-                    get: { router.activeTestAlarm.map { TestAlarmItem(alarm: $0) } },
+                    get: {
+                        guard canPresentGlobalModals else { return nil }
+                        return router.activeTestAlarm.map { TestAlarmItem(alarm: $0) }
+                    },
                     set: { item in
                         if item == nil { router.clearTestAlarm() }
                     }
                 )
             ) { item in
                 AlarmRingingView(alarm: item.alarm, isTestMode: true) {
-                    // Test alarm stop: just dismiss
                     router.clearTestAlarm()
                 }
                 .environmentObject(router)
+            }
+
+            // ✅ Handle test alarm state changes in ONE place
+            .onChange(of: router.activeTestAlarm) { _, newValue in
+                if newValue != nil {
+                    showSettingsNav = false
+                    router.dismissPaywall()
+                    showingAddAlarm = false
+                    editingAlarmItem = nil
+
+                    volumeMonitor.stop()
+                    return
+                }
+
+                // dismissed
+                if resumeAfterTestAlarm {
+                    resumeAfterTestAlarm = false
+                    suppressOnboardingForModal = false
+                    Task { @MainActor in
+                        router.forceShowOnboarding = true
+                    }
+                }
             }
 
             // Existing: real alarm full-screen cover (driven by alarm ID)
@@ -258,7 +361,6 @@ struct ContentView: View {
                     }
                     .environmentObject(router)
                 } else {
-                    // Alarm ID no longer exists (deleted / storage reset). Avoid blank cover.
                     Color.clear
                         .onAppear { router.clearActiveAlarm() }
                 }
@@ -290,12 +392,10 @@ struct ContentView: View {
                 Text(notificationHealth.capability.message)
             }
 
-            // ✅ Keep notification status current
             .task {
                 await notificationHealth.refresh()
             }
 
-            // ✅ Start/stop VolumeMonitor while ContentView is alive (but don't fight active alarms)
             .onAppear {
                 if !isRingingOrTesting {
                     volumeMonitor.start()
@@ -305,7 +405,6 @@ struct ContentView: View {
                 volumeMonitor.stop()
             }
 
-            // ✅ Scene phase handling
             .onChange(of: scenePhase) { _, newValue in
                 switch newValue {
                 case .active:
@@ -313,46 +412,26 @@ struct ContentView: View {
                     if !isRingingOrTesting {
                         volumeMonitor.start()
                     }
-
                 case .background:
                     volumeMonitor.stop()
-
                 case .inactive:
-                    // ✅ Do nothing to avoid session churn during transitions.
                     break
-
                 @unknown default:
                     break
                 }
             }
 
-            // ✅ If a notification tries to open an alarm while a sheet/onboarding is up,
+            // ✅ If a notification tries to open a real alarm while a sheet is up,
             // dismiss sheets so the fullScreenCover can present.
-            .onChange(of: router.activeTestAlarm) { _, newValue in
-                guard newValue != nil else { return }
-
-                // ✅ NEW: make sure nothing else is presenting
-                showSettingsNav = false
-                router.dismissPaywall()
-
-                showingAddAlarm = false
-                editingAlarmItem = nil
-
-                // ✅ Stop volume monitoring during ringing/test alarm
-                volumeMonitor.stop()
-            }
-
             .onChange(of: router.activeAlarmID) { _, newValue in
                 guard newValue != nil else { return }
 
-                // ✅ NEW: make sure nothing else is presenting
                 showSettingsNav = false
                 router.dismissPaywall()
 
                 showingAddAlarm = false
                 editingAlarmItem = nil
 
-                // ✅ Stop volume monitoring during ringing
                 volumeMonitor.stop()
             }
         }
@@ -383,13 +462,11 @@ struct ContentView: View {
                     alarm: alarm,
                     onEdit: { editingAlarmItem = EditingAlarmItem(id: alarm.id) },
                     onToggle: { newValue in
-                        // ✅ Guardrail: only gate turning ON
                         if newValue == false {
                             store.setEnabled(alarmID: alarm.id, isEnabled: false)
                             return
                         }
 
-                        // Attempting to turn ON — verify notifications
                         Task {
                             let ok = await notificationHealth.ensurePermissionOrSettings()
                             if ok {
@@ -397,8 +474,6 @@ struct ContentView: View {
                             } else {
                                 pendingToggleAlarmID = alarm.id
                                 showNotificationsGate = true
-
-                                // Ensure alarm stays OFF (in case toggle UI briefly flips)
                                 store.setEnabled(alarmID: alarm.id, isEnabled: false)
                             }
                         }
@@ -518,8 +593,6 @@ private struct AlarmCardRow: View {
         )
     }
 
-    // MARK: - Repeat display (Every day / Weekdays / Weekends / Chips)
-
     private var repeatRow: some View {
         if let label = repeatPatternLabel(for: alarm.repeatDays) {
             return AnyView(
@@ -586,8 +659,6 @@ private struct AlarmCardRow: View {
 
 #if DEBUG
 #Preview {
-    // NOTE: Provide environment objects in previews if you want it to render.
-    // If you prefer, you can remove the preview entirely.
     ContentView()
 }
 #endif

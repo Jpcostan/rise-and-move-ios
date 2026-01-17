@@ -85,26 +85,11 @@ struct Rise_MoveApp: App {
     }
 }
 
-/// Decides whether to show onboarding or the main app.
-/// Stored locally in UserDefaults via AppStorage.
+/// App root.
+/// ✅ ContentView is the single source of truth for onboarding presentation.
 private struct RootView: View {
-    @EnvironmentObject private var router: AppRouter
-    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding: Bool = false
-
     var body: some View {
-        if hasCompletedOnboarding {
-            ContentView()
-        } else {
-            OnboardingFlowView(
-                onFinish: {
-                    hasCompletedOnboarding = true
-                },
-                onTryTestAlarm: {
-                    // Optional CTA. Doesn’t mark onboarding complete.
-                    router.openTestAlarm()
-                }
-            )
-        }
+        ContentView()
     }
 }
 

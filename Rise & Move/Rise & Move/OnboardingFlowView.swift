@@ -3,15 +3,17 @@ import UserNotifications
 import UIKit
 
 struct OnboardingFlowView: View {
+    let initialStep: Int
     let onFinish: () -> Void
-    let onTryTestAlarm: () -> Void
+    let onTryTestAlarm: (Int) -> Void
+    let onUnlockPro: (Int) -> Void
 
-    @State private var step: Int = 0
+    @State private var step: Int
 
     // ✅ Use NotificationHealth so onboarding matches Settings behavior
     @StateObject private var notificationHealth = NotificationHealth()
 
-    // ✅ Router access for presenting Paywall + reading Pro status
+    // ✅ Router access for reading Pro status (presentation is handled by ContentView)
     @EnvironmentObject private var router: AppRouter
 
     // Keep this for the UI label + status row
@@ -19,6 +21,27 @@ struct OnboardingFlowView: View {
 
     // Keep (used to choose initial button label)
     @State private var didRequestNotifications: Bool = false
+
+    private static let maxStepIndex: Int = 4
+
+    // ✅ Small "warm-up" to reduce first-time presentation latency feel
+    @State private var tapHaptic = UIImpactFeedbackGenerator(style: .light)
+
+    init(
+        initialStep: Int = 0,
+        onFinish: @escaping () -> Void,
+        onTryTestAlarm: @escaping (Int) -> Void,
+        onUnlockPro: @escaping (Int) -> Void
+    ) {
+        let clamped = min(max(initialStep, 0), Self.maxStepIndex)
+
+        self.initialStep = clamped
+        self.onFinish = onFinish
+        self.onTryTestAlarm = onTryTestAlarm
+        self.onUnlockPro = onUnlockPro
+
+        _step = State(initialValue: clamped)
+    }
 
     var body: some View {
         ZStack {
@@ -54,12 +77,20 @@ struct OnboardingFlowView: View {
             }
         }
         .onAppear {
+            // ✅ Pre-warm haptics & (indirectly) the interaction pipeline
+            tapHaptic.prepare()
+
             Task { await refreshNotificationStatus() }
         }
-        // ✅ CHANGED: when the app becomes active again (e.g., returning from Settings),
-        // refresh notification status so the UI updates immediately.
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task { await refreshNotificationStatus() }
+        }
+        // ✅ If ContentView re-presents onboarding with a different resume step, sync it.
+        .onChange(of: initialStep) { _, newValue in
+            let clamped = min(max(newValue, 0), Self.maxStepIndex)
+            if step != clamped {
+                step = clamped
+            }
         }
         .accessibilityElement(children: .contain)
     }
@@ -87,10 +118,7 @@ struct OnboardingFlowView: View {
                 bodyText: "Rise & Move uses notifications to deliver alarms reliably, even when the app isn’t open."
             )
 
-            statusRow(
-                title: "Status",
-                value: notificationsStatusText
-            )
+            statusRow(title: "Status", value: notificationsStatusText)
 
             Button {
                 Task { await handleNotificationsCTA() }
@@ -120,7 +148,14 @@ struct OnboardingFlowView: View {
             )
 
             Button {
-                onTryTestAlarm()
+                // ✅ Immediate feedback so the tap never feels "dead"
+                tapHaptic.impactOccurred()
+                tapHaptic.prepare()
+
+                // ✅ Ensure the callback runs on MainActor immediately
+                Task { @MainActor in
+                    onTryTestAlarm(step)
+                }
             } label: {
                 Text("Try Test Alarm")
                     .font(.system(.callout, design: .rounded))
@@ -171,7 +206,7 @@ struct OnboardingFlowView: View {
                 subtitle: "Keep using Rise & Move anytime.",
                 bodyText: """
                 Your first Rise & Move stop is free.
-                Pro unlocks unlimited use and supports ongoing development.
+                Pro unlocks unlimited use and supports ongoing (and calm) improvements.
                 """
             )
 
@@ -183,10 +218,10 @@ struct OnboardingFlowView: View {
                     .padding(.top, 2)
             } else {
                 Button {
-                    // ✅ Defer paywall until onboarding dismisses (prevents "single sheet" issue)
-                    router.requestPaywallAfterOnboarding()
-                    // ✅ CHANGED: centralize finishing logic (consistent for first-run + replay)
-                    finishOnboarding()
+                    // ✅ Delegate presentation + resume behavior to ContentView
+                    Task { @MainActor in
+                        onUnlockPro(step)
+                    }
                 } label: {
                     Text("Unlock Pro")
                         .font(.system(.callout, design: .rounded))
@@ -231,15 +266,15 @@ struct OnboardingFlowView: View {
                 .disabled(step == 0)
 
                 Button {
-                    if step < 4 {
+                    if step < Self.maxStepIndex {
                         withAnimation(.easeOut(duration: 0.18)) {
                             step += 1
                         }
                     } else {
-                        finishOnboarding() // ✅ CHANGED
+                        onFinish()
                     }
                 } label: {
-                    Text(step < 4 ? "Continue" : "Get Started")
+                    Text(step < Self.maxStepIndex ? "Continue" : "Get Started")
                         .font(.system(.callout, design: .rounded))
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
@@ -248,7 +283,7 @@ struct OnboardingFlowView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.white.opacity(0.18))
                 .foregroundStyle(.white)
-                .accessibilityHint(step < 4 ? "Go to the next step." : "Finish onboarding and enter the app.")
+                .accessibilityHint(step < Self.maxStepIndex ? "Go to the next step." : "Finish onboarding and enter the app.")
             }
 
             Text(step == 1 || step == 3 ? "You can change this anytime in Settings." : " ")
@@ -266,11 +301,6 @@ struct OnboardingFlowView: View {
                         .stroke(.white.opacity(0.10), lineWidth: 1)
                 )
         )
-    }
-
-    // ✅ CHANGED: centralized finish
-    private func finishOnboarding() {
-        onFinish()
     }
 
     // MARK: - Notifications (capability-driven)
@@ -305,18 +335,12 @@ struct OnboardingFlowView: View {
 
     private func statusText(for capability: NotificationHealth.AlarmCapability) -> String {
         switch capability {
-        case .ok:
-            return "Enabled"
-        case .notDetermined:
-            return "Not requested"
-        case .denied:
-            return "Denied"
-        case .alertsDisabled:
-            return "Alerts Off"
-        case .soundsDisabled:
-            return "Sounds Off"
-        case .unknown:
-            return "Unknown"
+        case .ok: return "Enabled"
+        case .notDetermined: return "Not requested"
+        case .denied: return "Denied"
+        case .alertsDisabled: return "Alerts Off"
+        case .soundsDisabled: return "Sounds Off"
+        case .unknown: return "Unknown"
         }
     }
 
@@ -324,24 +348,22 @@ struct OnboardingFlowView: View {
     private func handleNotificationsCTA() async {
         didRequestNotifications = true
 
-        // If not determined, request permission once.
         if notificationHealth.capability == .notDetermined {
             _ = await notificationHealth.requestPermission()
+            // Let the system commit changes before we re-read settings
+            await Task.yield()
             await refreshNotificationStatus()
             return
         }
 
-        // If denied/disabled/unknown, route to Settings (standard iOS behavior).
         if !notificationHealth.capability.isAlarmCapable {
             notificationHealth.openAppSettings()
-            // Refresh after a short delay so UI updates when user comes back.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                Task { await refreshNotificationStatus() }
-            }
+            // didBecomeActive will refresh when the user returns, but a yield here helps too.
+            await Task.yield()
+            await refreshNotificationStatus()
             return
         }
 
-        // Otherwise it’s ok—nothing to do.
         await refreshNotificationStatus()
     }
 
